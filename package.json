@@ -1,0 +1,29 @@
+{
+  "name": "antigravity-edge-patcher",
+  "version": "1.0.0",
+  "description": "Automated patcher and source repository for Microsoft Edge integration in Google Antigravity 2.0 /browser command",
+  "main": "scripts/patcher.js",
+  "scripts": {
+    "status": "node scripts/status.js",
+    "install-patch": "node scripts/install.js",
+    "update": "node scripts/install.js --force",
+    "uninstall-patch": "node scripts/uninstall.js"
+  },
+  "keywords": [
+    "antigravity",
+    "edge",
+    "browser",
+    "mcp",
+    "patcher"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hihumanzone/antigravity-edge-patcher.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hihumanzone/antigravity-edge-patcher/issues"
+  },
+  "homepage": "https://github.com/hihumanzone/antigravity-edge-patcher#readme",
+  "author": "hihumanzone",
+  "license": "MIT"
+}

@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# npm / logs
+npm-debug.log*
+*.log
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Patcher-generated local artifacts (machine-specific, never commit)
+src/mcp_config.local.json
+*.backup
+app.asar
+app.asar.unpacked/
+
+# Editor
+.vscode/
+.idea/

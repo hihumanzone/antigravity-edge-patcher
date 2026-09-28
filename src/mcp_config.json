@@ -1,0 +1,14 @@
+{
+  "_comment": "Documentation template only. The installer generates ~/.gemini/config/mcp_config.json dynamically from your resolved Antigravity paths, merging into any existing config. Replace <ANTIGRAVITY_RESOURCES> with %LOCALAPPDATA%\\Programs\\antigravity\\resources.",
+  "mcpServers": {
+    "chrome_devtools": {
+      "command": "node",
+      "args": [
+        "<ANTIGRAVITY_RESOURCES>\\app.asar.unpacked\\node_modules\\chrome-devtools-mcp\\build\\src\\bin\\chrome-devtools-mcp.js",
+        "--no-usage-statistics",
+        "--no-performance-crux",
+        "--autoConnect"
+      ]
+    }
+  }
+}
