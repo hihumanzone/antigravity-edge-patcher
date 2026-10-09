@@ -7,7 +7,8 @@
         "<ANTIGRAVITY_RESOURCES>\\app.asar.unpacked\\node_modules\\chrome-devtools-mcp\\build\\src\\bin\\chrome-devtools-mcp.js",
         "--no-usage-statistics",
         "--no-performance-crux",
-        "--autoConnect"
+        "--browserUrl",
+        "http://127.0.0.1:9222"
       ]
     }
   }

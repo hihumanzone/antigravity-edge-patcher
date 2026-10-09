@@ -103,35 +103,66 @@ function install(options = {}) {
     throw new Error('Antigravity is currently running. Please close Antigravity before applying the patch (or pass --force).');
   }
 
-  // 1. Back up app.asar
-  if (fs.existsSync(paths.appAsar) && !fs.existsSync(paths.appAsarBackup)) {
-    console.log('[1/5] Backing up original app.asar -> app.asar.backup...');
+  // 1. Back up app.asar (only when pristine or no backup exists)
+  const asarBuf = fs.readFileSync(paths.appAsar);
+  const isAsarPatched = asarBuf.toString('latin1').includes('setupEdgeAutoLauncher');
+
+  if (fs.existsSync(paths.appAsar) && !isAsarPatched) {
+    console.log('[1/5] Backing up pristine app.asar -> app.asar.backup...');
     fs.copyFileSync(paths.appAsar, paths.appAsarBackup);
-  } else {
-    console.log('[1/5] app.asar.backup already exists, preserving original.');
+  } else if (fs.existsSync(paths.appAsarBackup)) {
+    console.log('[1/5] app.asar is already patched; preserving existing app.asar.backup.');
   }
 
-  // 2. Back up browser.js
-  if (fs.existsSync(paths.browserJs) && !fs.existsSync(paths.browserJsBackup)) {
-    console.log('[2/5] Backing up original browser.js -> browser.js.backup...');
+  // 2. Back up browser.js (only when pristine or no backup exists)
+  const currentBrowser = fs.existsSync(paths.browserJs) ? fs.readFileSync(paths.browserJs, 'utf8') : '';
+  const isBrowserPatched = currentBrowser.includes('ensureEdgeRunning');
+
+  if (fs.existsSync(paths.browserJs) && !isBrowserPatched) {
+    console.log('[2/5] Backing up pristine browser.js -> browser.js.backup...');
     fs.copyFileSync(paths.browserJs, paths.browserJsBackup);
-  } else {
-    console.log('[2/5] browser.js.backup already exists, preserving original.');
+  } else if (fs.existsSync(paths.browserJsBackup)) {
+    console.log('[2/5] browser.js is already patched; preserving existing browser.js.backup.');
   }
 
-  // 3. Deploy unpacked files (edgeLauncher.esm.js and patched browser.js)
-  console.log('[3/5] Deploying Edge launcher & patched browser.js to app.asar.unpacked...');
+  // 3. Deploy unpacked files (edgeLauncher.esm.js and dynamically patched browser.js)
+  console.log('[3/5] Deploying Edge launcher & dynamically patching browser.js in app.asar.unpacked...');
   const edgeLauncherSrc = path.join(srcDir, 'edgeLauncher.esm.js');
   const browserJsSrc = path.join(srcDir, 'browser.js');
 
   fs.mkdirSync(paths.cdtMcpSrc, { recursive: true });
   fs.copyFileSync(edgeLauncherSrc, paths.edgeLauncherEsm);
-  fs.copyFileSync(browserJsSrc, paths.browserJs);
+
+  // If browser.js is pristine, use it directly as base. Otherwise use backup or clean current.
+  let baseBrowserContent = '';
+  if (!isBrowserPatched && currentBrowser) {
+    baseBrowserContent = currentBrowser;
+  } else if (fs.existsSync(paths.browserJsBackup)) {
+    baseBrowserContent = fs.readFileSync(paths.browserJsBackup, 'utf8');
+  } else if (currentBrowser) {
+    baseBrowserContent = currentBrowser
+      .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
+      .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?options\.browserURL = "http:\/\/127\.0\.0\.1:9222";\r?\n\s*\}/, '');
+  } else {
+    baseBrowserContent = fs.readFileSync(browserJsSrc, 'utf8');
+  }
+
+  // Dynamically inject Edge integration without overwriting upstream module structure
+  if (!baseBrowserContent.includes("import { ensureEdgeRunning } from './edgeLauncher.js';")) {
+    baseBrowserContent = "import { ensureEdgeRunning } from './edgeLauncher.js';\n" + baseBrowserContent;
+  }
+  const connectRegex = /(if\s*\(\s*browser\?\.connected\s*\)\s*\{\s*return\s+browser;\s*\})/;
+  if (connectRegex.test(baseBrowserContent) && !baseBrowserContent.includes('await ensureEdgeRunning()')) {
+    baseBrowserContent = baseBrowserContent.replace(
+      connectRegex,
+      `$1\n    await ensureEdgeRunning().catch((err) => {\n        console.error("[EdgeLauncher] ensureEdgeRunning error:", err.message);\n    });\n    if (!options.browserURL && !options.wsEndpoint && !options.userDataDir) {\n        options.browserURL = "http://127.0.0.1:9222";\n    }`
+    );
+  }
+  fs.writeFileSync(paths.browserJs, baseBrowserContent, 'utf8');
 
   // 4. Patch app.asar (if not already patched)
   console.log('[4/5] Checking and patching app.asar (Electron main process)...');
-  const asarBuf = fs.readFileSync(paths.appAsar);
-  if (!asarBuf.toString('latin1').includes('setupEdgeAutoLauncher') || options.force) {
+  if (!isAsarPatched || options.force) {
     console.log('      Extracting app.asar...');
     const tempExtractDir = path.join(os.tmpdir(), 'antigravity_asar_patch_' + Date.now());
     child_process.execSync(`npx asar extract "${paths.appAsar}" "${tempExtractDir}"`, { stdio: 'inherit' });
@@ -226,17 +257,43 @@ function install(options = {}) {
       path.join(paths.unpackedDir, 'node_modules', 'chrome-devtools-mcp', 'build', 'src', 'bin', 'chrome-devtools-mcp.js'),
       "--no-usage-statistics",
       "--no-performance-crux",
-      "--autoConnect"
+      "--browserUrl",
+      "http://127.0.0.1:9222"
     ]
   };
 
   // Write clean UTF-8 without BOM
   fs.writeFileSync(paths.mcpConfig, JSON.stringify(mcpJson, null, 2) + '\n', 'utf8');
 
+  // Refresh language server MCP registry if running
+  refreshLanguageServer();
+
   console.log('\n=====================================================');
   console.log('  SUCCESS: Microsoft Edge integration applied!');
   console.log('  You can now start Antigravity and use /browser.');
   console.log('=====================================================\n');
+}
+
+function refreshLanguageServer() {
+  try {
+    const script = `
+      $proc = Get-CimInstance Win32_Process -Filter "Name = 'language_server.exe'" | Select-Object -First 1 ProcessId, CommandLine
+      if ($proc) {
+        $csrf = if ($proc.CommandLine -match '--csrf_token\\s+([a-f0-9\\-]+)') { $matches[1] } else { '' }
+        $ports = Get-NetTCPConnection -OwningProcess $proc.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
+        foreach ($p in $ports) {
+          try {
+            $uri = "http://127.0.0.1:$p/exa.language_server_pb.LanguageServerService/RefreshMcpServers"
+            $headers = @{ 'x-codeium-csrf-token' = $csrf; 'Content-Type' = 'application/json' }
+            Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body '{}' -TimeoutSec 2 | Out-Null
+            Write-Output "Refreshed on port $p"
+          } catch {}
+        }
+      }
+    `;
+    const out = child_process.execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' }).trim();
+    if (out) console.log('  [OK] Language server MCP registry refreshed.');
+  } catch {}
 }
 
 function uninstall(options = {}) {

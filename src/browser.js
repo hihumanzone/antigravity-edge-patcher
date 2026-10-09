@@ -7,30 +7,19 @@ import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { logger } from './logger.js';
 import { puppeteer } from './third_party/index.js';
+import { logger, puppeteerLogger } from './utils/logger.js';
+import { isAllowedUrl } from './utils/url.js';
 import { ensureEdgeRunning } from './edgeLauncher.js';
 let browser;
 let browserMode;
-function makeTargetFilter(enableExtensions = false) {
-    const ignoredPrefixes = new Set(['chrome://', 'chrome-untrusted://']);
-    if (!enableExtensions) {
-        ignoredPrefixes.add('chrome-extension://');
-    }
+export function makeTargetFilter(enableExtensions = false) {
     return function targetFilter(target) {
-        if (target.url() === 'chrome://newtab/') {
+        const url = target.url();
+        if (!url) {
             return true;
         }
-        // Could be the only page opened in the browser.
-        if (target.url().startsWith('chrome://inspect')) {
-            return true;
-        }
-        for (const prefix of ignoredPrefixes) {
-            if (target.url().startsWith(prefix)) {
-                return false;
-            }
-        }
-        return true;
+        return isAllowedUrl(url, { categoryExtensions: enableExtensions });
     };
 }
 export async function ensureBrowserConnected(options) {
@@ -41,11 +30,18 @@ export async function ensureBrowserConnected(options) {
     await ensureEdgeRunning().catch((err) => {
         console.error('[EdgeLauncher] ensureEdgeRunning error:', err.message);
     });
+    if (!options.browserURL && !options.wsEndpoint && !options.userDataDir) {
+        options.browserURL = 'http://127.0.0.1:9222';
+    }
     const connectOptions = {
         targetFilter: makeTargetFilter(enableExtensions),
         defaultViewport: null,
         handleDevToolsAsPage: true,
+        blocklist: options.blocklist,
+        allowlist: options.allowlist,
+        logger: puppeteerLogger,
     };
+    let autoConnect = false;
     if (options.wsEndpoint) {
         connectOptions.browserWSEndpoint = options.wsEndpoint;
         if (options.wsHeaders) {
@@ -55,11 +51,49 @@ export async function ensureBrowserConnected(options) {
     else if (options.browserURL) {
         connectOptions.browserURL = options.browserURL;
     }
-    else {
-        // Default directly to Edge CDP endpoint on port 9222
-        connectOptions.browserURL = 'http://127.0.0.1:9222';
+    else if (channel || options.userDataDir) {
+        const userDataDir = options.userDataDir;
+        if (userDataDir) {
+            autoConnect = true;
+            // TODO: re-expose this logic via Puppeteer.
+            const portPath = path.join(userDataDir, 'DevToolsActivePort');
+            try {
+                const fileContent = await fs.promises.readFile(portPath, 'utf8');
+                const [rawPort, rawPath] = fileContent
+                    .split('\n')
+                    .map(line => {
+                    return line.trim();
+                })
+                    .filter(line => {
+                    return !!line;
+                });
+                if (!rawPort || !rawPath) {
+                    throw new Error(`Invalid DevToolsActivePort '${fileContent}' found`);
+                }
+                const port = parseInt(rawPort, 10);
+                if (isNaN(port) || port <= 0 || port > 65535) {
+                    throw new Error(`Invalid port '${rawPort}' found`);
+                }
+                const browserWSEndpoint = `ws://127.0.0.1:${port}${rawPath}`;
+                connectOptions.browserWSEndpoint = browserWSEndpoint;
+            }
+            catch (error) {
+                throw new Error(`Could not connect to Chrome in ${userDataDir}. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.`, {
+                    cause: error,
+                });
+            }
+        }
+        else {
+            if (!channel) {
+                throw new Error('Channel must be provided if userDataDir is missing');
+            }
+            connectOptions.channel = (channel === 'stable' ? 'chrome' : `chrome-${channel}`);
+        }
     }
-    logger('Connecting Puppeteer to ', JSON.stringify(connectOptions));
+    else {
+        throw new Error('Either browserURL, wsEndpoint, channel or userDataDir must be provided');
+    }
+    logger?.('Connecting Puppeteer to ', JSON.stringify(connectOptions));
     try {
         // Assign mode before browser so a concurrent closeBrowser() never sees
         // `browser` set with `browserMode` still undefined (would fall through
@@ -73,7 +107,7 @@ export async function ensureBrowserConnected(options) {
             cause: err,
         });
     }
-    logger('Connected Puppeteer');
+    logger?.('Connected Puppeteer');
     return browser;
 }
 export function detectDisplay() {
@@ -139,6 +173,9 @@ export async function launch(options) {
             acceptInsecureCerts: options.acceptInsecureCerts,
             handleDevToolsAsPage: true,
             enableExtensions: options.enableExtensions,
+            blocklist: options.blocklist,
+            allowlist: options.allowlist,
+            logger: puppeteerLogger,
         });
         if (options.logFile) {
             // FIXME: we are probably subscribing too late to catch startup logs. We
@@ -175,13 +212,6 @@ export async function ensureBrowserLaunched(options) {
     browser = launched;
     return browser;
 }
-/**
- * Shutdown hook for the active browser. Closes a launched browser (so the
- * Chrome subprocess is reaped) or disconnects from an attached browser (so
- * the user's Chrome instance stays alive). No-op if no browser is active or
- * the connection has already been dropped. Called from the server entrypoint
- * on stdin EOF / SIGTERM / SIGINT.
- */
 export async function closeBrowser() {
     const b = browser;
     const mode = browserMode;
@@ -192,12 +222,12 @@ export async function closeBrowser() {
     }
     if (mode === 'launched') {
         await b.close().catch(err => {
-            logger('Failed to close browser', err);
+            logger?.('Failed to close browser', err);
         });
         return;
     }
     await b.disconnect().catch(err => {
-        logger('Failed to disconnect from browser', err);
+        logger?.('Failed to disconnect from browser', err);
     });
 }
 //# sourceMappingURL=browser.js.map
