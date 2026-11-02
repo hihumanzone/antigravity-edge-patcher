@@ -54,7 +54,7 @@ function extractAsarSafe(asarPath, destDir, unpackedDir) {
   fs.readSync(fd, headerBuf, 0, headerSize, 16);
   const str = headerBuf.toString('utf8').trim();
   const header = JSON.parse(str.slice(0, str.lastIndexOf('}') + 1));
-  const baseOffset = 16 + headerSize;
+  const baseOffset = 8 + headerSize;
 
   function walk(dirObj, curDest) {
     fs.mkdirSync(curDest, { recursive: true });
@@ -64,7 +64,9 @@ function extractAsarSafe(asarPath, destDir, unpackedDir) {
         walk(entry, destPath);
       } else if (!entry.unpacked && entry.offset !== undefined) {
         const buf = Buffer.alloc(entry.size);
-        fs.readSync(fd, buf, 0, entry.size, baseOffset + parseInt(entry.offset, 10));
+        if (entry.size > 0) {
+          fs.readSync(fd, buf, 0, entry.size, baseOffset + parseInt(entry.offset, 10));
+        }
         fs.writeFileSync(destPath, buf);
       }
     }
@@ -255,7 +257,8 @@ function install(options = {}) {
   if (!isAsarPatched || options.force) {
     console.log('      Extracting app.asar safely (bypassing missing unpacked files)...');
     const tempExtractDir = path.join(os.tmpdir(), 'antigravity_asar_patch_' + Date.now());
-    extractAsarSafe(paths.appAsar, tempExtractDir, paths.unpackedDir);
+    const sourceAsar = (paths.appAsarBackup && fs.existsSync(paths.appAsarBackup)) ? paths.appAsarBackup : paths.appAsar;
+    extractAsarSafe(sourceAsar, tempExtractDir, paths.unpackedDir);
 
     // Copy edgeLauncher.cjs.js to dist/edgeLauncher.js
     const edgeLauncherCjsSrc = path.join(srcDir, 'edgeLauncher.cjs.js');

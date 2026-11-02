@@ -105,9 +105,10 @@ export async function ensureEdgeRunning(port = DEFAULT_PORT) {
   ];
 
   _edgeProcess = child_process.spawn(edgeExe, args, {
-    detached: false,
+    detached: true,
     stdio: 'ignore'
   });
+  _edgeProcess.unref();
 
   _edgeProcess.on('exit', () => {
     _edgeProcess = null;

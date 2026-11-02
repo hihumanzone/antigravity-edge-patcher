@@ -120,9 +120,10 @@ async function ensureEdgeRunning(port = DEFAULT_PORT) {
   ];
 
   _edgeProcess = child_process.spawn(edgeExe, args, {
-    detached: false,
+    detached: true,
     stdio: 'ignore'
   });
+  _edgeProcess.unref();
 
   _edgeProcess.on('exit', () => {
     _edgeProcess = null;
@@ -148,13 +149,16 @@ function setupEdgeAutoLauncher(session) {
     {
       urls: ['<all_urls>']
     },
-    async (details, callback) => {
+    (details, callback) => {
       if (details.url && details.url.includes('CheckDevToolsActivePort')) {
-        try {
-          await ensureEdgeRunning();
-        } catch (err) {
-          console.error('[EdgeLauncher] Error ensuring Edge running:', err);
-        }
+        ensureEdgeRunning()
+          .catch((err) => {
+            console.error('[EdgeLauncher] Error ensuring Edge running:', err);
+          })
+          .finally(() => {
+            callback({});
+          });
+        return;
       }
       callback({});
     }
