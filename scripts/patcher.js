@@ -41,6 +41,44 @@ function isAntigravityRunning() {
   }
 }
 
+function extractAsarSafe(asarPath, destDir, unpackedDir) {
+  const fd = fs.openSync(asarPath, 'r');
+  const sizeBuf = Buffer.alloc(8);
+  fs.readSync(fd, sizeBuf, 0, 8, 4);
+  const headerSize = sizeBuf.readUInt32LE(0);
+  const headerBuf = Buffer.alloc(headerSize);
+  fs.readSync(fd, headerBuf, 0, headerSize, 16);
+  const str = headerBuf.toString('utf8').trim();
+  const header = JSON.parse(str.slice(0, str.lastIndexOf('}') + 1));
+  const baseOffset = 16 + headerSize;
+
+  function walk(dirObj, curDest) {
+    fs.mkdirSync(curDest, { recursive: true });
+    for (const [name, entry] of Object.entries(dirObj.files)) {
+      const destPath = path.join(curDest, name);
+      if (entry.files) {
+        walk(entry, destPath);
+      } else if (!entry.unpacked && entry.offset !== undefined) {
+        const buf = Buffer.alloc(entry.size);
+        fs.readSync(fd, buf, 0, entry.size, baseOffset + parseInt(entry.offset, 10));
+        fs.writeFileSync(destPath, buf);
+      }
+    }
+  }
+
+  walk(header, destDir);
+  fs.closeSync(fd);
+
+  // Synchronize unpacked node_modules/chrome-devtools-mcp into temp destDir for repacking
+  if (unpackedDir && fs.existsSync(unpackedDir)) {
+    const cdtSrc = path.join(unpackedDir, 'node_modules', 'chrome-devtools-mcp');
+    const cdtDest = path.join(destDir, 'node_modules', 'chrome-devtools-mcp');
+    if (fs.existsSync(cdtSrc)) {
+      fs.cpSync(cdtSrc, cdtDest, { recursive: true });
+    }
+  }
+}
+
 function checkStatus() {
   const paths = getAntigravityPaths();
   const checks = {
@@ -118,11 +156,18 @@ function install(options = {}) {
   const currentBrowser = fs.existsSync(paths.browserJs) ? fs.readFileSync(paths.browserJs, 'utf8') : '';
   const isBrowserPatched = currentBrowser.includes('ensureEdgeRunning');
 
-  if (fs.existsSync(paths.browserJs) && !isBrowserPatched) {
-    console.log('[2/5] Backing up pristine browser.js -> browser.js.backup...');
-    fs.copyFileSync(paths.browserJs, paths.browserJsBackup);
+  if (!fs.existsSync(paths.browserJsBackup) && fs.existsSync(paths.browserJs)) {
+    console.log('[2/5] Backing up browser.js -> browser.js.backup...');
+    if (!isBrowserPatched) {
+      fs.copyFileSync(paths.browserJs, paths.browserJsBackup);
+    } else {
+      const cleanBrowser = currentBrowser
+        .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
+        .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?options\.browserURL = "http:\/\/127\.0\.0\.1:9222";\r?\n\s*\}/, '');
+      fs.writeFileSync(paths.browserJsBackup, cleanBrowser, 'utf8');
+    }
   } else if (fs.existsSync(paths.browserJsBackup)) {
-    console.log('[2/5] browser.js is already patched; preserving existing browser.js.backup.');
+    console.log('[2/5] browser.js.backup already exists, preserving original.');
   }
 
   // 3. Deploy unpacked files (edgeLauncher.esm.js and dynamically patched browser.js)
@@ -163,9 +208,9 @@ function install(options = {}) {
   // 4. Patch app.asar (if not already patched)
   console.log('[4/5] Checking and patching app.asar (Electron main process)...');
   if (!isAsarPatched || options.force) {
-    console.log('      Extracting app.asar...');
+    console.log('      Extracting app.asar safely (bypassing missing unpacked files)...');
     const tempExtractDir = path.join(os.tmpdir(), 'antigravity_asar_patch_' + Date.now());
-    child_process.execSync(`npx asar extract "${paths.appAsar}" "${tempExtractDir}"`, { stdio: 'inherit' });
+    extractAsarSafe(paths.appAsar, tempExtractDir, paths.unpackedDir);
 
     // Copy edgeLauncher.cjs.js to dist/edgeLauncher.js
     const edgeLauncherCjsSrc = path.join(srcDir, 'edgeLauncher.cjs.js');
@@ -193,8 +238,8 @@ function install(options = {}) {
       fs.writeFileSync(mainJsPath, mainContent, 'utf8');
     }
 
-    console.log('      Repacking patched app.asar...');
-    child_process.execSync(`npx asar pack "${tempExtractDir}" "${paths.appAsar}"`, { stdio: 'inherit' });
+    console.log('      Repacking patched app.asar with unpacked chrome-devtools-mcp...');
+    child_process.execSync(`npx asar pack "${tempExtractDir}" "${paths.appAsar}" --unpack-dir "node_modules/chrome-devtools-mcp"`, { stdio: 'inherit' });
 
     // Clean temp
     try { fs.rmSync(tempExtractDir, { recursive: true, force: true }); } catch {}
