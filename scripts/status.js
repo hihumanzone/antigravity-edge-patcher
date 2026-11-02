@@ -13,6 +13,9 @@ console.log(`  - app.asar Backup Present  : ${res.checks.appAsarBackupExists ? '
 console.log(`  - app.asar Patched         : ${res.checks.appAsarPatched ? 'PATCHED (Edge Auto-launcher active)' : 'ORIGINAL (Chrome default)'}`);
 console.log(`  - Edge Launcher in Unpacked: ${res.checks.edgeLauncherUnpackedExists ? 'DEPLOYED' : 'NOT DEPLOYED'}`);
 console.log(`  - browser.js Patched       : ${res.checks.browserJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
+if (res.checks.browserManagerJsPatched !== undefined) {
+  console.log(`  - BrowserManager.js Patched: ${res.checks.browserManagerJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
+}
 console.log(`  - MCP Server Configured    : ${res.checks.mcpConfigConfigured ? 'YES (chrome_devtools active)' : 'NO'}`);
 console.log('\nPaths:');
 console.log(`  - Antigravity Base: ${res.paths.baseDir}`);

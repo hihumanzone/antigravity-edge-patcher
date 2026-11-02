@@ -13,6 +13,8 @@ function getAntigravityPaths() {
   const cdtMcpSrc = path.join(unpackedDir, 'node_modules', 'chrome-devtools-mcp', 'build', 'src');
   const browserJs = path.join(cdtMcpSrc, 'browser.js');
   const browserJsBackup = path.join(cdtMcpSrc, 'browser.js.backup');
+  const browserManagerJs = path.join(cdtMcpSrc, 'BrowserManager.js');
+  const browserManagerJsBackup = path.join(cdtMcpSrc, 'BrowserManager.js.backup');
   const edgeLauncherEsm = path.join(cdtMcpSrc, 'edgeLauncher.js');
   const mcpConfig = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
   const edgeProfile = path.join(os.homedir(), '.gemini', 'antigravity', 'edge_profile');
@@ -26,6 +28,8 @@ function getAntigravityPaths() {
     cdtMcpSrc,
     browserJs,
     browserJsBackup,
+    browserManagerJs,
+    browserManagerJsBackup,
     edgeLauncherEsm,
     mcpConfig,
     edgeProfile
@@ -96,6 +100,12 @@ function checkStatus() {
     checks.browserJsPatched = content.includes('edgeLauncher') || content.includes('http://127.0.0.1:9222');
   }
 
+  checks.browserManagerJsPatched = true;
+  if (fs.existsSync(paths.browserManagerJs)) {
+    const content = fs.readFileSync(paths.browserManagerJs, 'utf8');
+    checks.browserManagerJsPatched = content.includes('ensureEdgeRunning');
+  }
+
   if (fs.existsSync(paths.appAsar)) {
     try {
       const content = fs.readFileSync(paths.appAsar).toString('latin1');
@@ -111,8 +121,8 @@ function checkStatus() {
     } catch {}
   }
 
-  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.appAsarPatched && checks.mcpConfigConfigured;
-  const isCompletelyOriginal = !checks.edgeLauncherUnpackedExists && !checks.browserJsPatched && !checks.appAsarPatched;
+  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.browserManagerJsPatched && checks.appAsarPatched && checks.mcpConfigConfigured;
+  const isCompletelyOriginal = !checks.edgeLauncherUnpackedExists && !checks.browserJsPatched && checks.browserManagerJsPatched && !checks.appAsarPatched;
 
   let state = 'PARTIAL';
   if (isFullyPatched) state = 'PATCHED';
@@ -204,6 +214,41 @@ function install(options = {}) {
     );
   }
   fs.writeFileSync(paths.browserJs, baseBrowserContent, 'utf8');
+
+  // Dynamically patch BrowserManager.js if present (chrome-devtools-mcp v1.11+)
+  if (fs.existsSync(paths.browserManagerJs)) {
+    const currentBm = fs.readFileSync(paths.browserManagerJs, 'utf8');
+    const isBmPatched = currentBm.includes('ensureEdgeRunning');
+
+    if (!fs.existsSync(paths.browserManagerJsBackup)) {
+      console.log('      Backing up BrowserManager.js -> BrowserManager.js.backup...');
+      if (!isBmPatched) {
+        fs.copyFileSync(paths.browserManagerJs, paths.browserManagerJsBackup);
+      } else {
+        const cleanBm = currentBm
+          .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
+          .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?this\.#config\.resolved\.browserUrl = ['"]http:\/\/127\.0\.0\.1:9222['"];\r?\n\s*\}/, '');
+        fs.writeFileSync(paths.browserManagerJsBackup, cleanBm, 'utf8');
+      }
+    }
+
+    let baseBmContent = fs.existsSync(paths.browserManagerJsBackup)
+      ? fs.readFileSync(paths.browserManagerJsBackup, 'utf8')
+      : currentBm;
+
+    if (!baseBmContent.includes("import { ensureEdgeRunning } from './edgeLauncher.js';")) {
+      baseBmContent = "import { ensureEdgeRunning } from './edgeLauncher.js';\n" + baseBmContent;
+    }
+
+    const initTarget = /(async\s+#initBrowser\s*\(\s*\)\s*\{)/;
+    if (initTarget.test(baseBmContent) && !baseBmContent.includes('await ensureEdgeRunning()')) {
+      baseBmContent = baseBmContent.replace(
+        initTarget,
+        `$1\n        await ensureEdgeRunning().catch((err) => {\n            console.error('[EdgeLauncher] ensureEdgeRunning error:', err.message);\n        });\n        if (!this.#config.resolved.browserUrl && !this.#config.resolved.wsEndpoint && !this.#config.resolved.userDataDir) {\n            this.#config.resolved.browserUrl = 'http://127.0.0.1:9222';\n        }`
+      );
+    }
+    fs.writeFileSync(paths.browserManagerJs, baseBmContent, 'utf8');
+  }
 
   // 4. Patch app.asar (if not already patched)
   console.log('[4/5] Checking and patching app.asar (Electron main process)...');
@@ -364,10 +409,14 @@ function uninstall(options = {}) {
     console.log('[1/4] Warning: app.asar.backup not found; cannot restore app.asar.');
   }
 
-  // 2. Restore browser.js from backup
+  // 2. Restore browser.js and BrowserManager.js from backup
   if (fs.existsSync(paths.browserJsBackup)) {
     console.log('[2/4] Restoring pristine browser.js from backup...');
     fs.copyFileSync(paths.browserJsBackup, paths.browserJs);
+  }
+  if (fs.existsSync(paths.browserManagerJsBackup)) {
+    console.log('[2/4] Restoring pristine BrowserManager.js from backup...');
+    fs.copyFileSync(paths.browserManagerJsBackup, paths.browserManagerJs);
   }
 
   // 3. Remove edgeLauncher.js from unpacked directory
