@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ensureEdgeRunning = ensureEdgeRunning;
 exports.isEdgeRunning = isEdgeRunning;
+exports.getEdgePageTargets = getEdgePageTargets;
 exports.findEdgeExecutable = findEdgeExecutable;
 exports.syncDevToolsActivePort = syncDevToolsActivePort;
 exports.setupEdgeAutoLauncher = setupEdgeAutoLauncher;
@@ -61,6 +62,33 @@ function isEdgeRunning(port = DEFAULT_PORT) {
     req.setTimeout(500, () => {
       req.destroy();
       resolve(null);
+    });
+  });
+}
+
+function getEdgePageTargets(port = DEFAULT_PORT) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${port}/json/list`, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          if (res.statusCode === 200) {
+            const list = JSON.parse(data);
+            const pages = Array.isArray(list) ? list.filter(t => t.type === 'page') : [];
+            resolve(pages);
+          } else {
+            resolve([]);
+          }
+        } catch {
+          resolve([]);
+        }
+      });
+    });
+    req.on('error', () => resolve([]));
+    req.setTimeout(500, () => {
+      req.destroy();
+      resolve([]);
     });
   });
 }
@@ -135,6 +163,17 @@ async function ensureEdgeRunning(port = DEFAULT_PORT) {
     const version = await isEdgeRunning(port);
     if (version && version.webSocketDebuggerUrl) {
       syncDevToolsActivePort(port, version.webSocketDebuggerUrl);
+
+      // Page Readiness Barrier: wait a moment for Edge's initial tab to transition beyond empty/about:blank
+      const pageDeadline = Date.now() + 1000;
+      while (Date.now() < pageDeadline) {
+        const pages = await getEdgePageTargets(port);
+        if (pages.length > 0 && pages.some(p => p.url && p.url !== 'about:blank')) {
+          break;
+        }
+        await new Promise(r => setTimeout(r, 25));
+      }
+
       console.error(`[EdgeLauncher] Microsoft Edge launched with remote debugging on port ${port}`);
       return true;
     }

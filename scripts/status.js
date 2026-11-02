@@ -16,6 +16,12 @@ console.log(`  - browser.js Patched       : ${res.checks.browserJsPatched ? 'PAT
 if (res.checks.browserManagerJsPatched !== undefined) {
   console.log(`  - BrowserManager.js Patched: ${res.checks.browserManagerJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
 }
+if (res.checks.mcpPageJsPatched !== undefined) {
+  console.log(`  - McpPage.js Patched       : ${res.checks.mcpPageJsPatched ? 'PATCHED (URL fallback active)' : 'ORIGINAL'}`);
+}
+if (res.checks.mcpContextJsPatched !== undefined) {
+  console.log(`  - McpContext.js Patched    : ${res.checks.mcpContextJsPatched ? 'PATCHED (Target filter active)' : 'ORIGINAL'}`);
+}
 console.log(`  - MCP Server Configured    : ${res.checks.mcpConfigConfigured ? 'YES (chrome_devtools active)' : 'NO'}`);
 console.log('\nPaths:');
 console.log(`  - Antigravity Base: ${res.paths.baseDir}`);

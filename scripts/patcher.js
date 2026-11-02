@@ -15,6 +15,10 @@ function getAntigravityPaths() {
   const browserJsBackup = path.join(cdtMcpSrc, 'browser.js.backup');
   const browserManagerJs = path.join(cdtMcpSrc, 'BrowserManager.js');
   const browserManagerJsBackup = path.join(cdtMcpSrc, 'BrowserManager.js.backup');
+  const mcpPageJs = path.join(cdtMcpSrc, 'McpPage.js');
+  const mcpPageJsBackup = path.join(cdtMcpSrc, 'McpPage.js.backup');
+  const mcpContextJs = path.join(cdtMcpSrc, 'McpContext.js');
+  const mcpContextJsBackup = path.join(cdtMcpSrc, 'McpContext.js.backup');
   const edgeLauncherEsm = path.join(cdtMcpSrc, 'edgeLauncher.js');
   const mcpConfig = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
   const edgeProfile = path.join(os.homedir(), '.gemini', 'antigravity', 'edge_profile');
@@ -30,6 +34,10 @@ function getAntigravityPaths() {
     browserJsBackup,
     browserManagerJs,
     browserManagerJsBackup,
+    mcpPageJs,
+    mcpPageJsBackup,
+    mcpContextJs,
+    mcpContextJsBackup,
     edgeLauncherEsm,
     mcpConfig,
     edgeProfile
@@ -108,6 +116,18 @@ function checkStatus() {
     checks.browserManagerJsPatched = content.includes('ensureEdgeRunning');
   }
 
+  checks.mcpPageJsPatched = true;
+  if (fs.existsSync(paths.mcpPageJs)) {
+    const content = fs.readFileSync(paths.mcpPageJs, 'utf8');
+    checks.mcpPageJsPatched = content.includes('this.#pptrPage?.url() || this.target.url()');
+  }
+
+  checks.mcpContextJsPatched = true;
+  if (fs.existsSync(paths.mcpContextJs)) {
+    const content = fs.readFileSync(paths.mcpContextJs, 'utf8');
+    checks.mcpContextJsPatched = content.includes('!url') && content.includes("return target.type() === 'page';");
+  }
+
   if (fs.existsSync(paths.appAsar)) {
     try {
       const content = fs.readFileSync(paths.appAsar).toString('latin1');
@@ -123,8 +143,8 @@ function checkStatus() {
     } catch {}
   }
 
-  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.browserManagerJsPatched && checks.appAsarPatched && checks.mcpConfigConfigured;
-  const isCompletelyOriginal = !checks.edgeLauncherUnpackedExists && !checks.browserJsPatched && checks.browserManagerJsPatched && !checks.appAsarPatched;
+  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.browserManagerJsPatched && checks.mcpPageJsPatched && checks.mcpContextJsPatched && checks.appAsarPatched && checks.mcpConfigConfigured;
+  const isCompletelyOriginal = !checks.edgeLauncherUnpackedExists && !checks.browserJsPatched && !checks.appAsarPatched;
 
   let state = 'PARTIAL';
   if (isFullyPatched) state = 'PATCHED';
@@ -175,7 +195,8 @@ function install(options = {}) {
     } else {
       const cleanBrowser = currentBrowser
         .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
-        .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?options\.browserURL = "http:\/\/127\.0\.0\.1:9222";\r?\n\s*\}/, '');
+        .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?options\.browserURL = "http:\/\/127\.0\.0\.1:9222";\r?\n\s*\}/, '')
+        .replace(/\r?\n\s*\/\/ Wait for initial page target to be ready in Puppeteer[\s\S]*?await new Promise\(r => setTimeout\(r, 25\)\);\r?\n\s*\}/, '');
       fs.writeFileSync(paths.browserJsBackup, cleanBrowser, 'utf8');
     }
   } else if (fs.existsSync(paths.browserJsBackup)) {
@@ -215,6 +236,24 @@ function install(options = {}) {
       `$1\n    await ensureEdgeRunning().catch((err) => {\n        console.error("[EdgeLauncher] ensureEdgeRunning error:", err.message);\n    });\n    if (!options.browserURL && !options.wsEndpoint && !options.userDataDir) {\n        options.browserURL = "http://127.0.0.1:9222";\n    }`
     );
   }
+  const pptrConnectedTarget = /(browser\s*=\s*connected;\s*\r?\n\s*\}\s*\r?\n\s*catch)/;
+  if (pptrConnectedTarget.test(baseBrowserContent) && !baseBrowserContent.includes('targetDeadline')) {
+    baseBrowserContent = baseBrowserContent.replace(
+      pptrConnectedTarget,
+      `browser = connected;
+        // Wait for initial page target to be ready in Puppeteer
+        const targetDeadline = Date.now() + 1000;
+        while (Date.now() < targetDeadline) {
+            const pTargets = connected.targets().filter(t => t.type() === 'page');
+            if (pTargets.length > 0 && pTargets.some(t => t.url() && t.url() !== 'about:blank')) {
+                break;
+            }
+            await new Promise(r => setTimeout(r, 25));
+        }
+    }
+    catch`
+    );
+  }
   fs.writeFileSync(paths.browserJs, baseBrowserContent, 'utf8');
 
   // Dynamically patch BrowserManager.js if present (chrome-devtools-mcp v1.11+)
@@ -229,7 +268,8 @@ function install(options = {}) {
       } else {
         const cleanBm = currentBm
           .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
-          .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?this\.#config\.resolved\.browserUrl = ['"]http:\/\/127\.0\.0\.1:9222['"];\r?\n\s*\}/, '');
+          .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?this\.#config\.resolved\.browserUrl = ['"]http:\/\/127\.0\.0\.1:9222['"];\r?\n\s*\}/, '')
+          .replace(/\r?\n\s*\/\/ Wait for initial page target to be ready in Puppeteer[\s\S]*?await new Promise\(r => setTimeout\(r, 25\)\);\r?\n\s*\}/, '');
         fs.writeFileSync(paths.browserManagerJsBackup, cleanBm, 'utf8');
       }
     }
@@ -249,7 +289,90 @@ function install(options = {}) {
         `$1\n        await ensureEdgeRunning().catch((err) => {\n            console.error('[EdgeLauncher] ensureEdgeRunning error:', err.message);\n        });\n        if (!this.#config.resolved.browserUrl && !this.#config.resolved.wsEndpoint && !this.#config.resolved.userDataDir) {\n            this.#config.resolved.browserUrl = 'http://127.0.0.1:9222';\n        }`
       );
     }
+
+    const connectTarget = /(this\.#browser\s*=\s*connected;\s*\r?\n\s*connected\.once\('disconnected')/;
+    if (connectTarget.test(baseBmContent) && !baseBmContent.includes('targetDeadline')) {
+      baseBmContent = baseBmContent.replace(
+        connectTarget,
+        `this.#browser = connected;
+            // Wait for initial page target to be ready in Puppeteer
+            const targetDeadline = Date.now() + 1000;
+            while (Date.now() < targetDeadline) {
+                const pTargets = connected.targets().filter(t => t.type() === 'page');
+                if (pTargets.length > 0 && pTargets.some(t => t.url() && t.url() !== 'about:blank')) {
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 25));
+            }
+            connected.once('disconnected'`
+      );
+    }
+
     fs.writeFileSync(paths.browserManagerJs, baseBmContent, 'utf8');
+  }
+
+  // Dynamically patch McpPage.js if present (fixing initial target URL fallback for Edge)
+  if (fs.existsSync(paths.mcpPageJs)) {
+    const currentMcpPage = fs.readFileSync(paths.mcpPageJs, 'utf8');
+    const isMcpPagePatched = currentMcpPage.includes('this.#pptrPage?.url() || this.target.url()');
+
+    if (!fs.existsSync(paths.mcpPageJsBackup)) {
+      console.log('      Backing up McpPage.js -> McpPage.js.backup...');
+      if (!isMcpPagePatched) {
+        fs.copyFileSync(paths.mcpPageJs, paths.mcpPageJsBackup);
+      } else {
+        const cleanMcpPage = currentMcpPage.replace(
+          /return\s*\(this\.#pptrPage\?\.url\(\)\s*\|\|\s*this\.target\.url\(\)\)\s*\?\?\s*'';/,
+          'return this.#pptrPage?.url() ?? this.target.url();'
+        );
+        fs.writeFileSync(paths.mcpPageJsBackup, cleanMcpPage, 'utf8');
+      }
+    }
+
+    let baseMcpPageContent = fs.existsSync(paths.mcpPageJsBackup)
+      ? fs.readFileSync(paths.mcpPageJsBackup, 'utf8')
+      : currentMcpPage;
+
+    const urlRegex = /(url\(\)\s*\{\s*return\s+)this\.#pptrPage\?\.url\(\)\s*\?\?\s*this\.target\.url\(\);(\s*\})/;
+    if (urlRegex.test(baseMcpPageContent)) {
+      baseMcpPageContent = baseMcpPageContent.replace(
+        urlRegex,
+        `$1(this.#pptrPage?.url() || this.target.url()) ?? '';$2`
+      );
+    }
+    fs.writeFileSync(paths.mcpPageJs, baseMcpPageContent, 'utf8');
+  }
+
+  // Dynamically patch McpContext.js if present (fixing target readiness filter and premature page pruning)
+  if (fs.existsSync(paths.mcpContextJs)) {
+    const currentMcpContext = fs.readFileSync(paths.mcpContextJs, 'utf8');
+    const isMcpContextPatched = currentMcpContext.includes('!url') && currentMcpContext.includes("return target.type() === 'page';");
+
+    if (!fs.existsSync(paths.mcpContextJsBackup)) {
+      console.log('      Backing up McpContext.js -> McpContext.js.backup...');
+      if (!isMcpContextPatched) {
+        fs.copyFileSync(paths.mcpContextJs, paths.mcpContextJsBackup);
+      } else {
+        const cleanMcpContext = currentMcpContext.replace(
+          /const url = \(existingMcpPage \? existingMcpPage\.url\(\) : target\.url\(\)\) \|\| target\.url\(\);\r?\n\s*if \(!url\) \{\r?\n\s*return target\.type\(\) === 'page';\r?\n\s*\}/,
+          'const url = existingMcpPage ? existingMcpPage.url() : target.url();'
+        );
+        fs.writeFileSync(paths.mcpContextJsBackup, cleanMcpContext, 'utf8');
+      }
+    }
+
+    let baseMcpContextContent = fs.existsSync(paths.mcpContextJsBackup)
+      ? fs.readFileSync(paths.mcpContextJsBackup, 'utf8')
+      : currentMcpContext;
+
+    const targetUrlCheck = /(#isPageTarget\s*\(\s*target\s*\)\s*\{[\s\S]*?const\s+url\s*=\s*)(existingMcpPage\s*\?\s*existingMcpPage\.url\(\)\s*:\s*target\.url\(\));/;
+    if (targetUrlCheck.test(baseMcpContextContent)) {
+      baseMcpContextContent = baseMcpContextContent.replace(
+        targetUrlCheck,
+        `$1($2) || target.url();\n        if (!url) {\n            return target.type() === 'page';\n        }`
+      );
+    }
+    fs.writeFileSync(paths.mcpContextJs, baseMcpContextContent, 'utf8');
   }
 
   // 4. Patch app.asar (if not already patched)
@@ -412,7 +535,7 @@ function uninstall(options = {}) {
     console.log('[1/4] Warning: app.asar.backup not found; cannot restore app.asar.');
   }
 
-  // 2. Restore browser.js and BrowserManager.js from backup
+  // 2. Restore browser.js, BrowserManager.js, McpPage.js, and McpContext.js from backup
   if (fs.existsSync(paths.browserJsBackup)) {
     console.log('[2/4] Restoring pristine browser.js from backup...');
     fs.copyFileSync(paths.browserJsBackup, paths.browserJs);
@@ -420,6 +543,14 @@ function uninstall(options = {}) {
   if (fs.existsSync(paths.browserManagerJsBackup)) {
     console.log('[2/4] Restoring pristine BrowserManager.js from backup...');
     fs.copyFileSync(paths.browserManagerJsBackup, paths.browserManagerJs);
+  }
+  if (fs.existsSync(paths.mcpPageJsBackup)) {
+    console.log('[2/4] Restoring pristine McpPage.js from backup...');
+    fs.copyFileSync(paths.mcpPageJsBackup, paths.mcpPageJs);
+  }
+  if (fs.existsSync(paths.mcpContextJsBackup)) {
+    console.log('[2/4] Restoring pristine McpContext.js from backup...');
+    fs.copyFileSync(paths.mcpContextJsBackup, paths.mcpContextJs);
   }
 
   // 3. Remove edgeLauncher.js from unpacked directory

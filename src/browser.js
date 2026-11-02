@@ -101,6 +101,15 @@ export async function ensureBrowserConnected(options) {
         const connected = await puppeteer.connect(connectOptions);
         browserMode = 'connected';
         browser = connected;
+        // Wait for initial page target to be ready in Puppeteer
+        const targetDeadline = Date.now() + 1000;
+        while (Date.now() < targetDeadline) {
+            const pTargets = connected.targets().filter(t => t.type() === 'page');
+            if (pTargets.length > 0 && pTargets.some(t => t.url() && t.url() !== 'about:blank')) {
+                break;
+            }
+            await new Promise(r => setTimeout(r, 25));
+        }
     }
     catch (err) {
         throw new Error(`Could not connect to Microsoft Edge on port 9222. Check if Edge is running.`, {
