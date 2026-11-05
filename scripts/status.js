@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const fs = require('fs');
 const patcher = require('./patcher');
 
 const res = patcher.checkStatus();
@@ -12,7 +13,13 @@ console.log(`  - app.asar Present         : ${res.checks.appAsarExists ? 'OK' : 
 console.log(`  - app.asar Backup Present  : ${res.checks.appAsarBackupExists ? 'YES' : 'NO'}`);
 console.log(`  - app.asar Patched         : ${res.checks.appAsarPatched ? 'PATCHED (Edge Auto-launcher active)' : 'ORIGINAL (Chrome default)'}`);
 console.log(`  - Edge Launcher in Unpacked: ${res.checks.edgeLauncherUnpackedExists ? 'DEPLOYED' : 'NOT DEPLOYED'}`);
-console.log(`  - browser.js Patched       : ${res.checks.browserJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
+const mcpVerStr = res.checks.cdtMcpVersion
+  ? `v${res.checks.cdtMcpVersion}${res.checks.cdtMcpLatestVersion ? ` (latest: v${res.checks.cdtMcpLatestVersion})` : ''}`
+  : 'NOT FOUND';
+console.log(`  - chrome-devtools-mcp      : ${mcpVerStr}`);
+if (fs.existsSync(res.paths.browserJs)) {
+  console.log(`  - browser.js Patched       : ${res.checks.browserJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
+}
 if (res.checks.browserManagerJsPatched !== undefined) {
   console.log(`  - BrowserManager.js Patched: ${res.checks.browserManagerJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
 }

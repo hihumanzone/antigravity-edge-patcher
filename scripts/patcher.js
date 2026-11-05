@@ -10,7 +10,9 @@ function getAntigravityPaths() {
   const appAsar = path.join(resourcesDir, 'app.asar');
   const appAsarBackup = path.join(resourcesDir, 'app.asar.backup');
   const unpackedDir = path.join(resourcesDir, 'app.asar.unpacked');
-  const cdtMcpSrc = path.join(unpackedDir, 'node_modules', 'chrome-devtools-mcp', 'build', 'src');
+  const cdtMcpDir = path.join(unpackedDir, 'node_modules', 'chrome-devtools-mcp');
+  const cdtMcpPkgJson = path.join(cdtMcpDir, 'package.json');
+  const cdtMcpSrc = path.join(cdtMcpDir, 'build', 'src');
   const browserJs = path.join(cdtMcpSrc, 'browser.js');
   const browserJsBackup = path.join(cdtMcpSrc, 'browser.js.backup');
   const browserManagerJs = path.join(cdtMcpSrc, 'BrowserManager.js');
@@ -29,6 +31,8 @@ function getAntigravityPaths() {
     appAsar,
     appAsarBackup,
     unpackedDir,
+    cdtMcpDir,
+    cdtMcpPkgJson,
     cdtMcpSrc,
     browserJs,
     browserJsBackup,
@@ -50,6 +54,104 @@ function isAntigravityRunning() {
     return stdout.toLowerCase().includes('antigravity.exe');
   } catch {
     return false;
+  }
+}
+
+function getInstalledCdtMcpVersion(paths) {
+  if (paths.cdtMcpPkgJson && fs.existsSync(paths.cdtMcpPkgJson)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(paths.cdtMcpPkgJson, 'utf8'));
+      return pkg.version || null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function getLatestCdtMcpVersion() {
+  try {
+    const stdout = child_process.execSync('npm view chrome-devtools-mcp version', {
+      encoding: 'utf8',
+      timeout: 8000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (/^\d+\.\d+\.\d+/.test(stdout)) {
+      return stdout;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function stopRunningCdtMcpProcesses() {
+  try {
+    const script = `
+      Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*chrome-devtools-mcp*" } | ForEach-Object {
+        try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+      }
+    `;
+    child_process.execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { stdio: 'ignore' });
+  } catch {}
+}
+
+function updateChromeDevToolsMcp(paths, targetVersion = 'latest') {
+  const tempDir = path.join(os.tmpdir(), 'cdt_mcp_update_' + Date.now());
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  try {
+    stopRunningCdtMcpProcesses();
+    console.log(`      Downloading chrome-devtools-mcp@${targetVersion} via npm pack...`);
+    child_process.execSync(`npm pack chrome-devtools-mcp@${targetVersion}`, {
+      cwd: tempDir,
+      stdio: ['ignore', 'inherit', 'inherit'],
+      timeout: 45000
+    });
+
+    const tgz = fs.readdirSync(tempDir).find(f => f.endsWith('.tgz'));
+    if (!tgz) {
+      throw new Error('Failed to find downloaded chrome-devtools-mcp tarball in ' + tempDir);
+    }
+
+    console.log(`      Extracting ${tgz}...`);
+    child_process.execSync(`tar -xzf "${tgz}"`, {
+      cwd: tempDir,
+      stdio: ['ignore', 'inherit', 'inherit']
+    });
+
+    const extractedPkgDir = path.join(tempDir, 'package');
+    if (!fs.existsSync(extractedPkgDir) || !fs.existsSync(path.join(extractedPkgDir, 'package.json'))) {
+      throw new Error('Extracted package contents are invalid in ' + extractedPkgDir);
+    }
+
+    console.log(`      Deploying chrome-devtools-mcp to ${paths.cdtMcpDir}...`);
+    fs.mkdirSync(path.dirname(paths.cdtMcpDir), { recursive: true });
+
+    if (fs.existsSync(paths.cdtMcpDir)) {
+      fs.rmSync(paths.cdtMcpDir, { recursive: true, force: true });
+    }
+
+    fs.cpSync(extractedPkgDir, paths.cdtMcpDir, { recursive: true });
+
+    // Clean up stale backup files so fresh backups are taken from the new version
+    const backupsToClean = [
+      paths.browserJsBackup,
+      paths.browserManagerJsBackup,
+      paths.mcpPageJsBackup,
+      paths.mcpContextJsBackup
+    ];
+    for (const b of backupsToClean) {
+      if (fs.existsSync(b)) {
+        try { fs.unlinkSync(b); } catch {}
+      }
+    }
+
+    const newVersion = getInstalledCdtMcpVersion(paths);
+    console.log(`      [OK] chrome-devtools-mcp updated to v${newVersion || targetVersion}.`);
+    return true;
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   }
 }
 
@@ -87,6 +189,9 @@ function extractAsarSafe(asarPath, destDir, unpackedDir) {
   if (unpackedDir && fs.existsSync(unpackedDir)) {
     const cdtSrc = path.join(unpackedDir, 'node_modules', 'chrome-devtools-mcp');
     const cdtDest = path.join(destDir, 'node_modules', 'chrome-devtools-mcp');
+    if (fs.existsSync(cdtDest)) {
+      fs.rmSync(cdtDest, { recursive: true, force: true });
+    }
     if (fs.existsSync(cdtSrc)) {
       fs.cpSync(cdtSrc, cdtDest, { recursive: true });
     }
@@ -108,6 +213,9 @@ function checkStatus() {
   if (fs.existsSync(paths.browserJs)) {
     const content = fs.readFileSync(paths.browserJs, 'utf8');
     checks.browserJsPatched = content.includes('edgeLauncher') || content.includes('http://127.0.0.1:9222');
+  } else {
+    // In chrome-devtools-mcp v1.11+, BrowserManager.js replaced browser.js
+    checks.browserJsPatched = true;
   }
 
   checks.browserManagerJsPatched = true;
@@ -127,6 +235,9 @@ function checkStatus() {
     const content = fs.readFileSync(paths.mcpContextJs, 'utf8');
     checks.mcpContextJsPatched = content.includes('!url') && content.includes("return target.type() === 'page';");
   }
+
+  checks.cdtMcpVersion = getInstalledCdtMcpVersion(paths);
+  checks.cdtMcpLatestVersion = getLatestCdtMcpVersion();
 
   if (fs.existsSync(paths.appAsar)) {
     try {
@@ -173,74 +284,80 @@ function install(options = {}) {
     throw new Error('Antigravity is currently running. Please close Antigravity before applying the patch (or pass --force).');
   }
 
-  // 1. Back up app.asar (only when pristine or no backup exists)
+  // 1. Ensure latest chrome-devtools-mcp is installed
+  console.log('[1/6] Checking chrome-devtools-mcp version...');
+  const currentVersion = getInstalledCdtMcpVersion(paths);
+  const latestVersion = getLatestCdtMcpVersion();
+  let mcpUpdated = false;
+
+  if (latestVersion && (currentVersion !== latestVersion || options.forceUpdateMcp)) {
+    console.log(`      Updating chrome-devtools-mcp: v${currentVersion || 'none'} -> v${latestVersion}...`);
+    mcpUpdated = updateChromeDevToolsMcp(paths, latestVersion);
+  } else if (latestVersion) {
+    console.log(`      chrome-devtools-mcp is up to date (v${currentVersion}).`);
+  } else {
+    console.log(`      [Info] Unable to query npm registry (offline). Using installed v${currentVersion || 'unknown'}.`);
+  }
+
+  // 2. Back up app.asar (only when pristine or no backup exists)
   const asarBuf = fs.readFileSync(paths.appAsar);
   const isAsarPatched = asarBuf.toString('latin1').includes('setupEdgeAutoLauncher');
 
   if (fs.existsSync(paths.appAsar) && !isAsarPatched) {
-    console.log('[1/5] Backing up pristine app.asar -> app.asar.backup...');
+    console.log('[2/6] Backing up pristine app.asar -> app.asar.backup...');
     fs.copyFileSync(paths.appAsar, paths.appAsarBackup);
   } else if (fs.existsSync(paths.appAsarBackup)) {
-    console.log('[1/5] app.asar is already patched; preserving existing app.asar.backup.');
+    console.log('[2/6] app.asar is already patched; preserving existing app.asar.backup.');
   }
 
-  // 2. Back up browser.js (only when pristine or no backup exists)
-  const currentBrowser = fs.existsSync(paths.browserJs) ? fs.readFileSync(paths.browserJs, 'utf8') : '';
-  const isBrowserPatched = currentBrowser.includes('ensureEdgeRunning');
+  // 3. Back up upstream files (only when pristine or no backup exists)
+  console.log('[3/6] Backing up upstream files...');
+  if (fs.existsSync(paths.browserJs)) {
+    const currentBrowser = fs.readFileSync(paths.browserJs, 'utf8');
+    const isBrowserPatched = currentBrowser.includes('ensureEdgeRunning');
 
-  if (!fs.existsSync(paths.browserJsBackup) && fs.existsSync(paths.browserJs)) {
-    console.log('[2/5] Backing up browser.js -> browser.js.backup...');
-    if (!isBrowserPatched) {
-      fs.copyFileSync(paths.browserJs, paths.browserJsBackup);
-    } else {
-      const cleanBrowser = currentBrowser
-        .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
-        .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?options\.browserURL = "http:\/\/127\.0\.0\.1:9222";\r?\n\s*\}/, '')
-        .replace(/\r?\n\s*\/\/ Wait for initial page target to be ready in Puppeteer[\s\S]*?await new Promise\(r => setTimeout\(r, 25\)\);\r?\n\s*\}/, '');
-      fs.writeFileSync(paths.browserJsBackup, cleanBrowser, 'utf8');
+    if (!fs.existsSync(paths.browserJsBackup)) {
+      if (!isBrowserPatched) {
+        fs.copyFileSync(paths.browserJs, paths.browserJsBackup);
+      } else {
+        const cleanBrowser = currentBrowser
+          .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
+          .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?options\.browserURL = "http:\/\/127\.0\.0\.1:9222";\r?\n\s*\}/, '')
+          .replace(/\r?\n\s*\/\/ Wait for initial page target to be ready in Puppeteer[\s\S]*?await new Promise\(r => setTimeout\(r, 25\)\);\r?\n\s*\}/, '');
+        fs.writeFileSync(paths.browserJsBackup, cleanBrowser, 'utf8');
+      }
     }
-  } else if (fs.existsSync(paths.browserJsBackup)) {
-    console.log('[2/5] browser.js.backup already exists, preserving original.');
   }
 
-  // 3. Deploy unpacked files (edgeLauncher.esm.js and dynamically patched browser.js)
-  console.log('[3/5] Deploying Edge launcher & dynamically patching browser.js in app.asar.unpacked...');
+  // 4. Deploy unpacked files (edgeLauncher.esm.js and dynamically patched browser.js / BrowserManager.js / McpPage.js / McpContext.js)
+  console.log('[4/6] Deploying Edge launcher & dynamically patching MCP files in app.asar.unpacked...');
   const edgeLauncherSrc = path.join(srcDir, 'edgeLauncher.esm.js');
   const browserJsSrc = path.join(srcDir, 'browser.js');
 
   fs.mkdirSync(paths.cdtMcpSrc, { recursive: true });
   fs.copyFileSync(edgeLauncherSrc, paths.edgeLauncherEsm);
 
-  // If browser.js is pristine, use it directly as base. Otherwise use backup or clean current.
-  let baseBrowserContent = '';
-  if (!isBrowserPatched && currentBrowser) {
-    baseBrowserContent = currentBrowser;
-  } else if (fs.existsSync(paths.browserJsBackup)) {
-    baseBrowserContent = fs.readFileSync(paths.browserJsBackup, 'utf8');
-  } else if (currentBrowser) {
-    baseBrowserContent = currentBrowser
-      .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
-      .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?options\.browserURL = "http:\/\/127\.0\.0\.1:9222";\r?\n\s*\}/, '');
-  } else {
-    baseBrowserContent = fs.readFileSync(browserJsSrc, 'utf8');
-  }
+  // If browser.js exists, patch it
+  if (fs.existsSync(paths.browserJs)) {
+    let baseBrowserContent = fs.existsSync(paths.browserJsBackup)
+      ? fs.readFileSync(paths.browserJsBackup, 'utf8')
+      : fs.readFileSync(paths.browserJs, 'utf8');
 
-  // Dynamically inject Edge integration without overwriting upstream module structure
-  if (!baseBrowserContent.includes("import { ensureEdgeRunning } from './edgeLauncher.js';")) {
-    baseBrowserContent = "import { ensureEdgeRunning } from './edgeLauncher.js';\n" + baseBrowserContent;
-  }
-  const connectRegex = /(if\s*\(\s*browser\?\.connected\s*\)\s*\{\s*return\s+browser;\s*\})/;
-  if (connectRegex.test(baseBrowserContent) && !baseBrowserContent.includes('await ensureEdgeRunning()')) {
-    baseBrowserContent = baseBrowserContent.replace(
-      connectRegex,
-      `$1\n    await ensureEdgeRunning().catch((err) => {\n        console.error("[EdgeLauncher] ensureEdgeRunning error:", err.message);\n    });\n    if (!options.browserURL && !options.wsEndpoint && !options.userDataDir) {\n        options.browserURL = "http://127.0.0.1:9222";\n    }`
-    );
-  }
-  const pptrConnectedTarget = /(browser\s*=\s*connected;\s*\r?\n\s*\}\s*\r?\n\s*catch)/;
-  if (pptrConnectedTarget.test(baseBrowserContent) && !baseBrowserContent.includes('targetDeadline')) {
-    baseBrowserContent = baseBrowserContent.replace(
-      pptrConnectedTarget,
-      `browser = connected;
+    if (!baseBrowserContent.includes("import { ensureEdgeRunning } from './edgeLauncher.js';")) {
+      baseBrowserContent = "import { ensureEdgeRunning } from './edgeLauncher.js';\n" + baseBrowserContent;
+    }
+    const connectRegex = /(if\s*\(\s*browser\?\.connected\s*\)\s*\{\s*return\s+browser;\s*\})/;
+    if (connectRegex.test(baseBrowserContent) && !baseBrowserContent.includes('await ensureEdgeRunning()')) {
+      baseBrowserContent = baseBrowserContent.replace(
+        connectRegex,
+        `$1\n    await ensureEdgeRunning().catch((err) => {\n        console.error("[EdgeLauncher] ensureEdgeRunning error:", err.message);\n    });\n    if (!options.browserURL && !options.wsEndpoint && !options.userDataDir) {\n        options.browserURL = "http://127.0.0.1:9222";\n    }`
+      );
+    }
+    const pptrConnectedTarget = /(browser\s*=\s*connected;\s*\r?\n\s*\}\s*\r?\n\s*catch)/;
+    if (pptrConnectedTarget.test(baseBrowserContent) && !baseBrowserContent.includes('targetDeadline')) {
+      baseBrowserContent = baseBrowserContent.replace(
+        pptrConnectedTarget,
+        `browser = connected;
         // Wait for initial page target to be ready in Puppeteer
         const targetDeadline = Date.now() + 1000;
         while (Date.now() < targetDeadline) {
@@ -252,9 +369,10 @@ function install(options = {}) {
         }
     }
     catch`
-    );
+      );
+    }
+    fs.writeFileSync(paths.browserJs, baseBrowserContent, 'utf8');
   }
-  fs.writeFileSync(paths.browserJs, baseBrowserContent, 'utf8');
 
   // Dynamically patch BrowserManager.js if present (chrome-devtools-mcp v1.11+)
   if (fs.existsSync(paths.browserManagerJs)) {
@@ -375,9 +493,9 @@ function install(options = {}) {
     fs.writeFileSync(paths.mcpContextJs, baseMcpContextContent, 'utf8');
   }
 
-  // 4. Patch app.asar (if not already patched)
-  console.log('[4/5] Checking and patching app.asar (Electron main process)...');
-  if (!isAsarPatched || options.force) {
+  // 5. Patch app.asar (if not already patched or if forced / updated)
+  console.log('[5/6] Checking and patching app.asar (Electron main process)...');
+  if (!isAsarPatched || options.force || mcpUpdated) {
     console.log('      Extracting app.asar safely (bypassing missing unpacked files)...');
     const tempExtractDir = path.join(os.tmpdir(), 'antigravity_asar_patch_' + Date.now());
     const sourceAsar = (paths.appAsarBackup && fs.existsSync(paths.appAsarBackup)) ? paths.appAsarBackup : paths.appAsar;
@@ -418,8 +536,8 @@ function install(options = {}) {
     console.log('      app.asar is already patched.');
   }
 
-  // 5. Ensure mcp_config.json has chrome_devtools and edge_profile exists
-  console.log('[5/5] Configuring global MCP registry and dedicated profile directory...');
+  // 6. Ensure mcp_config.json has chrome_devtools and edge_profile exists
+  console.log('[6/6] Configuring global MCP registry and dedicated profile directory...');
   fs.mkdirSync(paths.edgeProfile, { recursive: true });
 
   // Lock Agent profile name to "Browser-Agent"
@@ -583,5 +701,8 @@ module.exports = {
   isAntigravityRunning,
   checkStatus,
   install,
-  uninstall
+  uninstall,
+  getInstalledCdtMcpVersion,
+  getLatestCdtMcpVersion,
+  updateChromeDevToolsMcp
 };
