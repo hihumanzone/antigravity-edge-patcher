@@ -569,10 +569,10 @@ function install(options = {}) {
       if (mainContent.includes(targetPoint)) {
         mainContent = mainContent.replace(
           targetPoint,
-          targetPoint + '\n    // Auto-launch Edge for /browser slash command\n    (0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);\n    void edgeLauncher_1.ensureEdgeRunning().catch(() => {});'
+          targetPoint + '\n    // Edge auto-launcher registered for on-demand use (does NOT launch on startup)\n    (0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);'
         );
       } else {
-        mainContent += '\n(0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);\nvoid edgeLauncher_1.ensureEdgeRunning().catch(() => {});\n';
+        mainContent += '\n(0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);\n';
       }
       fs.writeFileSync(mainJsPath, mainContent, 'utf8');
     }
@@ -617,10 +617,10 @@ function install(options = {}) {
       }
     }
 
-    // 5d. Patch dist/browserStream/browserViewerTabDriver.js (forwarding navigate, input, reload to Edge)
+    // 5d. Patch dist/browserStream/browserViewerTabDriver.js (forwarding reload/navigate only without duplicate input dispatch)
     const bvtDriverPath = path.join(distDir, 'browserStream', 'browserViewerTabDriver.js');
     if (fs.existsSync(bvtDriverPath)) {
-      console.log('      Patching browserViewerTabDriver.js (Edge action & perception forwarding)...');
+      console.log('      Patching browserViewerTabDriver.js (Edge state synchronization)...');
       let bvtContent = fs.readFileSync(bvtDriverPath, 'utf8');
       if (!bvtContent.includes('edgeVirtualEngine')) {
         const execTarget = 'async executeControlOperation(tabId, entry, op) {';
@@ -631,15 +631,9 @@ function install(options = {}) {
             const edgeVirtualEngine = require('../edgeVirtualEngine');
             if (op.kind === 'navigate') {
                 void edgeVirtualEngine.navigateEdge(op.url);
-            } else if (op.kind === 'reload') {
-                void edgeVirtualEngine.dispatchEdgeInput('Page.reload', {});
-            } else if (op.kind === 'input' && op.action) {
-                if (op.action.type === 'mouse') void edgeVirtualEngine.dispatchEdgeInput('Input.dispatchMouseEvent', op.action.params);
-                else if (op.action.type === 'key') void edgeVirtualEngine.dispatchEdgeInput('Input.dispatchKeyEvent', op.action.params);
-                else if (op.action.type === 'paste') void edgeVirtualEngine.dispatchEdgeInput('Input.insertText', { text: op.action.text });
             }
         } catch (e) {
-            console.error('[EdgeVirtualEngine] Action dispatch error:', e.message);
+            console.error('[EdgeVirtualEngine] Navigation sync error:', e.message);
         }`
           );
           fs.writeFileSync(bvtDriverPath, bvtContent, 'utf8');
