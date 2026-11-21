@@ -272,10 +272,13 @@ function checkStatus() {
   checks.cdtMcpVersion = getInstalledCdtMcpVersion(paths);
   checks.cdtMcpLatestVersion = getLatestCdtMcpVersion();
 
+  checks.appAsarPatched = false;
+  checks.webviewVirtualizationPatched = false;
   if (fs.existsSync(paths.appAsar)) {
     try {
       const content = fs.readFileSync(paths.appAsar).toString('latin1');
       checks.appAsarPatched = content.includes('setupEdgeAutoLauncher');
+      checks.webviewVirtualizationPatched = content.includes('edgeVirtualEngine');
     } catch {}
   }
 
@@ -289,8 +292,8 @@ function checkStatus() {
     } catch {}
   }
 
-  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.browserManagerJsPatched && checks.mcpPageJsPatched && checks.mcpContextJsPatched && checks.appAsarPatched && checks.mcpConfigConfigured;
-  const isCompletelyOriginal = !checks.edgeLauncherUnpackedExists && !checks.browserJsPatched && !checks.appAsarPatched;
+  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.browserManagerJsPatched && checks.mcpPageJsPatched && checks.mcpContextJsPatched && checks.appAsarPatched && checks.webviewVirtualizationPatched && checks.mcpConfigConfigured;
+  const isCompletelyOriginal = !checks.edgeLauncherUnpackedExists && !checks.browserJsPatched && !checks.appAsarPatched && !checks.webviewVirtualizationPatched;
 
   let state = 'PARTIAL';
   if (isFullyPatched) state = 'PATCHED';
@@ -344,13 +347,14 @@ function install(options = {}) {
 
   // 2. Back up app.asar (only when pristine or no backup exists)
   const asarBuf = fs.readFileSync(paths.appAsar);
-  const isAsarPatched = asarBuf.toString('latin1').includes('setupEdgeAutoLauncher');
+  const hasAutoLauncher = asarBuf.toString('latin1').includes('setupEdgeAutoLauncher');
+  const isAsarPatched = hasAutoLauncher && asarBuf.toString('latin1').includes('edgeVirtualEngine');
 
-  if (fs.existsSync(paths.appAsar) && !isAsarPatched) {
+  if (fs.existsSync(paths.appAsar) && !hasAutoLauncher) {
     console.log('[2/6] Backing up pristine app.asar -> app.asar.backup...');
     fs.copyFileSync(paths.appAsar, paths.appAsarBackup);
   } else if (fs.existsSync(paths.appAsarBackup)) {
-    console.log('[2/6] app.asar is already patched; preserving existing app.asar.backup.');
+    console.log('[2/6] Preserving pristine app.asar.backup.');
   }
 
   // 3. Back up upstream files (only when pristine or no backup exists)
@@ -537,26 +541,28 @@ function install(options = {}) {
   }
 
   // 5. Patch app.asar (if not already patched or if forced / updated)
-  console.log('[5/6] Checking and patching app.asar (Electron main process)...');
+  console.log('[5/6] Checking and patching app.asar (Electron main process & webview virtualization)...');
   if (!isAsarPatched || options.force || mcpUpdated) {
     console.log('      Extracting app.asar safely (bypassing missing unpacked files)...');
     const tempExtractDir = path.join(os.tmpdir(), 'antigravity_asar_patch_' + Date.now());
     const sourceAsar = (paths.appAsarBackup && fs.existsSync(paths.appAsarBackup)) ? paths.appAsarBackup : paths.appAsar;
     extractAsarSafe(sourceAsar, tempExtractDir, paths.unpackedDir);
 
-    // Copy edgeLauncher.cjs.js to dist/edgeLauncher.js
-    const edgeLauncherCjsSrc = path.join(srcDir, 'edgeLauncher.cjs.js');
     const distDir = path.join(tempExtractDir, 'dist');
-    fs.copyFileSync(edgeLauncherCjsSrc, path.join(distDir, 'edgeLauncher.js'));
 
-    // Patch dist/main.js
+    // 5a. Deploy edgeLauncher.js and edgeVirtualEngine.js
+    console.log('      Deploying Edge launcher & virtual engine modules to dist/...');
+    const edgeLauncherCjsSrc = path.join(srcDir, 'edgeLauncher.cjs.js');
+    const edgeVirtualEngineCjsSrc = path.join(srcDir, 'edgeVirtualEngine.cjs.js');
+    fs.copyFileSync(edgeLauncherCjsSrc, path.join(distDir, 'edgeLauncher.js'));
+    fs.copyFileSync(edgeVirtualEngineCjsSrc, path.join(distDir, 'edgeVirtualEngine.js'));
+
+    // 5b. Patch dist/main.js
     const mainJsPath = path.join(distDir, 'main.js');
     let mainContent = fs.readFileSync(mainJsPath, 'utf8');
 
     if (!mainContent.includes('setupEdgeAutoLauncher')) {
-      // Add require
       mainContent = 'const edgeLauncher_1 = require("./edgeLauncher");\n' + mainContent;
-      // Add auto-launcher setup call
       const targetPoint = '(0, updater_1.initAutoUpdater)(HEADLESS, settingsService);';
       if (mainContent.includes(targetPoint)) {
         mainContent = mainContent.replace(
@@ -564,10 +570,80 @@ function install(options = {}) {
           targetPoint + '\n    // Auto-launch Edge for /browser slash command\n    (0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);'
         );
       } else {
-        // Fallback: append after app startup
         mainContent += '\n(0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);\n';
       }
       fs.writeFileSync(mainJsPath, mainContent, 'utf8');
+    }
+
+    // 5c. Patch dist/wcvBrowserRegistry.js (cookie synchronization & Edge session binding)
+    const wcvRegistryPath = path.join(distDir, 'wcvBrowserRegistry.js');
+    if (fs.existsSync(wcvRegistryPath)) {
+      console.log('      Patching wcvBrowserRegistry.js (Edge profile cookie synchronization)...');
+      let wcvContent = fs.readFileSync(wcvRegistryPath, 'utf8');
+      if (!wcvContent.includes('edgeVirtualEngine')) {
+        const targetListener = 'wc.setMaxListeners?.(32);';
+        if (wcvContent.includes(targetListener)) {
+          wcvContent = wcvContent.replace(
+            targetListener,
+            targetListener + '\n        try {\n            const edgeVirtualEngine = require("./edgeVirtualEngine");\n            void edgeVirtualEngine.syncEdgeCookiesToSession(wc.session);\n            edgeVirtualEngine.setupCookieSyncWatcher(wc.session);\n        } catch (e) {\n            console.error("[EdgeVirtualEngine] Cookie sync error:", e.message);\n        }'
+          );
+        }
+        const reparentPoint = 'return this.toSnapshot(existing);';
+        if (wcvContent.includes(reparentPoint)) {
+          wcvContent = wcvContent.replace(
+            reparentPoint,
+            'try { const edgeVirtualEngine = require("./edgeVirtualEngine"); void edgeVirtualEngine.syncEdgeCookiesToSession(existing.view.webContents.session); } catch {}\n            ' + reparentPoint
+          );
+        }
+        fs.writeFileSync(wcvRegistryPath, wcvContent, 'utf8');
+      }
+    }
+
+    // 5d. Patch dist/browserStream/browserViewerTabDriver.js (forwarding navigate, input, reload to Edge)
+    const bvtDriverPath = path.join(distDir, 'browserStream', 'browserViewerTabDriver.js');
+    if (fs.existsSync(bvtDriverPath)) {
+      console.log('      Patching browserViewerTabDriver.js (Edge action & perception forwarding)...');
+      let bvtContent = fs.readFileSync(bvtDriverPath, 'utf8');
+      if (!bvtContent.includes('edgeVirtualEngine')) {
+        const execTarget = 'async executeControlOperation(tabId, entry, op) {';
+        if (bvtContent.includes(execTarget)) {
+          bvtContent = bvtContent.replace(
+            execTarget,
+            execTarget + `\n        try {
+            const edgeVirtualEngine = require('../edgeVirtualEngine');
+            if (op.kind === 'navigate') {
+                void edgeVirtualEngine.navigateEdge(op.url);
+            } else if (op.kind === 'reload') {
+                void edgeVirtualEngine.dispatchEdgeInput('Page.reload', {});
+            } else if (op.kind === 'input' && op.action) {
+                if (op.action.type === 'mouse') void edgeVirtualEngine.dispatchEdgeInput('Input.dispatchMouseEvent', op.action.params);
+                else if (op.action.type === 'key') void edgeVirtualEngine.dispatchEdgeInput('Input.dispatchKeyEvent', op.action.params);
+                else if (op.action.type === 'paste') void edgeVirtualEngine.dispatchEdgeInput('Input.insertText', { text: op.action.text });
+            }
+        } catch (e) {
+            console.error('[EdgeVirtualEngine] Action dispatch error:', e.message);
+        }`
+          );
+          fs.writeFileSync(bvtDriverPath, bvtContent, 'utf8');
+        }
+      }
+    }
+
+    // 5e. Patch dist/wcvZOrderController.js (ensuring external auth URLs route to Edge smoothly)
+    const wcvZOrderPath = path.join(distDir, 'wcvZOrderController.js');
+    if (fs.existsSync(wcvZOrderPath)) {
+      console.log('      Patching wcvZOrderController.js (Edge auth flow routing)...');
+      let zorderContent = fs.readFileSync(wcvZOrderPath, 'utf8');
+      if (!zorderContent.includes('edgeVirtualEngine')) {
+        const authBlock = 'if ((0, webviewBrowser_1.isExternalOnlyAuthUrl)(url)) {';
+        if (zorderContent.includes(authBlock)) {
+          zorderContent = zorderContent.replace(
+            authBlock,
+            `try { const edgeVirtualEngine = require('./edgeVirtualEngine'); void edgeVirtualEngine.navigateEdge(url); } catch {}\n        ` + authBlock
+          );
+          fs.writeFileSync(wcvZOrderPath, zorderContent, 'utf8');
+        }
+      }
     }
 
     console.log('      Repacking patched app.asar with unpacked chrome-devtools-mcp...');
