@@ -82,14 +82,21 @@ export function syncDevToolsActivePort(port, wsUrl) {
     const pathname = new URL(wsUrl).pathname;
     const content = `${port}\n${pathname}\n`;
 
-    fs.mkdirSync(CHROME_USER_DATA_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CHROME_USER_DATA_DIR, 'DevToolsActivePort'), content, 'utf8');
+    try {
+      if (!fs.existsSync(CHROME_USER_DATA_DIR)) fs.mkdirSync(CHROME_USER_DATA_DIR, { recursive: true });
+      fs.writeFileSync(path.join(CHROME_USER_DATA_DIR, 'DevToolsActivePort'), content, 'utf8');
+    } catch {}
 
-    fs.mkdirSync(PROFILE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(PROFILE_DIR, 'DevToolsActivePort'), content, 'utf8');
+    try {
+      if (!fs.existsSync(PROFILE_DIR)) fs.mkdirSync(PROFILE_DIR, { recursive: true });
+      fs.writeFileSync(path.join(PROFILE_DIR, 'DevToolsActivePort'), content, 'utf8');
+    } catch {}
 
-    fs.mkdirSync(ANTIGRAVITY_USER_DATA_DIR, { recursive: true });
-    fs.writeFileSync(path.join(ANTIGRAVITY_USER_DATA_DIR, 'DevToolsActivePort'), content, 'utf8');
+    try {
+      if (!fs.existsSync(ANTIGRAVITY_USER_DATA_DIR)) fs.mkdirSync(ANTIGRAVITY_USER_DATA_DIR, { recursive: true });
+      fs.writeFileSync(path.join(ANTIGRAVITY_USER_DATA_DIR, 'DevToolsActivePort'), content, 'utf8');
+    } catch {}
+
     return true;
   } catch (err) {
     console.error('[EdgeLauncher] Error syncing DevToolsActivePort:', err);
@@ -111,8 +118,13 @@ export async function ensureEdgeRunning(port = DEFAULT_PORT) {
     throw new Error('Microsoft Edge executable was not found on this system');
   }
 
-  fs.mkdirSync(PROFILE_DIR, { recursive: true });
-  fs.mkdirSync(CHROME_USER_DATA_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(PROFILE_DIR)) fs.mkdirSync(PROFILE_DIR, { recursive: true });
+  } catch {}
+
+  try {
+    if (!fs.existsSync(CHROME_USER_DATA_DIR)) fs.mkdirSync(CHROME_USER_DATA_DIR, { recursive: true });
+  } catch {}
 
   const args = [
     `--remote-debugging-port=${port}`,

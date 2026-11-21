@@ -17,6 +17,7 @@ const mcpVerStr = res.checks.cdtMcpVersion
   ? `v${res.checks.cdtMcpVersion}${res.checks.cdtMcpLatestVersion ? ` (latest: v${res.checks.cdtMcpLatestVersion})` : ''}`
   : 'NOT FOUND';
 console.log(`  - chrome-devtools-mcp      : ${mcpVerStr}`);
+console.log(`  - MCP Entrypoint Script    : ${fs.existsSync(res.paths.cdtMcpEntryJs) ? 'OK' : 'MISSING'} (${res.paths.cdtMcpEntryJs})`);
 if (fs.existsSync(res.paths.browserJs)) {
   console.log(`  - browser.js Patched       : ${res.checks.browserJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
 }

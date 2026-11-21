@@ -12,7 +12,32 @@ function getAntigravityPaths() {
   const unpackedDir = path.join(resourcesDir, 'app.asar.unpacked');
   const cdtMcpDir = path.join(unpackedDir, 'node_modules', 'chrome-devtools-mcp');
   const cdtMcpPkgJson = path.join(cdtMcpDir, 'package.json');
-  const cdtMcpSrc = path.join(cdtMcpDir, 'build', 'src');
+
+  // Detect dynamic source and entry directories across versions:
+  // - v1.9 - v1.12 used build/src
+  // - v1.13+ GN/Ninja build uses out/Default/gen/src
+  let cdtMcpSrc = path.join(cdtMcpDir, 'build', 'src');
+  if (fs.existsSync(path.join(cdtMcpDir, 'out', 'Default', 'gen', 'src'))) {
+    cdtMcpSrc = path.join(cdtMcpDir, 'out', 'Default', 'gen', 'src');
+  }
+
+  let cdtMcpEntryJs = path.join(cdtMcpSrc, 'bin', 'chrome-devtools-mcp.js');
+
+  if (fs.existsSync(cdtMcpPkgJson)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(cdtMcpPkgJson, 'utf8'));
+      if (pkg.bin) {
+        const binTarget = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin['chrome-devtools-mcp'];
+        if (binTarget) {
+          cdtMcpEntryJs = path.resolve(cdtMcpDir, binTarget);
+        }
+      }
+      if (pkg.main) {
+        cdtMcpSrc = path.dirname(path.resolve(cdtMcpDir, pkg.main));
+      }
+    } catch {}
+  }
+
   const browserJs = path.join(cdtMcpSrc, 'browser.js');
   const browserJsBackup = path.join(cdtMcpSrc, 'browser.js.backup');
   const browserManagerJs = path.join(cdtMcpSrc, 'BrowserManager.js');
@@ -34,6 +59,7 @@ function getAntigravityPaths() {
     cdtMcpDir,
     cdtMcpPkgJson,
     cdtMcpSrc,
+    cdtMcpEntryJs,
     browserJs,
     browserJsBackup,
     browserManagerJs,
@@ -134,6 +160,11 @@ function updateChromeDevToolsMcp(paths, targetVersion = 'latest') {
 
     fs.cpSync(extractedPkgDir, paths.cdtMcpDir, { recursive: true });
 
+    // Clean up zombie build/ directory if out/ exists
+    if (fs.existsSync(path.join(paths.cdtMcpDir, 'out')) && fs.existsSync(path.join(paths.cdtMcpDir, 'build'))) {
+      try { fs.rmSync(path.join(paths.cdtMcpDir, 'build'), { recursive: true, force: true }); } catch {}
+    }
+
     // Clean up stale backup files so fresh backups are taken from the new version
     const backupsToClean = [
       paths.browserJsBackup,
@@ -218,19 +249,21 @@ function checkStatus() {
     checks.browserJsPatched = true;
   }
 
-  checks.browserManagerJsPatched = true;
+  checks.browserManagerJsPatched = false;
   if (fs.existsSync(paths.browserManagerJs)) {
     const content = fs.readFileSync(paths.browserManagerJs, 'utf8');
     checks.browserManagerJsPatched = content.includes('ensureEdgeRunning');
+  } else if (fs.existsSync(paths.browserJs)) {
+    checks.browserManagerJsPatched = true;
   }
 
-  checks.mcpPageJsPatched = true;
+  checks.mcpPageJsPatched = false;
   if (fs.existsSync(paths.mcpPageJs)) {
     const content = fs.readFileSync(paths.mcpPageJs, 'utf8');
     checks.mcpPageJsPatched = content.includes('this.#pptrPage?.url() || this.target.url()');
   }
 
-  checks.mcpContextJsPatched = true;
+  checks.mcpContextJsPatched = false;
   if (fs.existsSync(paths.mcpContextJs)) {
     const content = fs.readFileSync(paths.mcpContextJs, 'utf8');
     checks.mcpContextJsPatched = content.includes('!url') && content.includes("return target.type() === 'page';");
@@ -250,7 +283,9 @@ function checkStatus() {
     try {
       const content = fs.readFileSync(paths.mcpConfig, 'utf8');
       const json = JSON.parse(content);
-      checks.mcpConfigConfigured = !!(json.mcpServers && json.mcpServers.chrome_devtools);
+      const srv = json.mcpServers && json.mcpServers.chrome_devtools;
+      const targetScript = srv && srv.args && srv.args[0];
+      checks.mcpConfigConfigured = !!(srv && targetScript && fs.existsSync(targetScript));
     } catch {}
   }
 
@@ -269,7 +304,7 @@ function checkStatus() {
 }
 
 function install(options = {}) {
-  const paths = getAntigravityPaths();
+  let paths = getAntigravityPaths();
   const srcDir = path.resolve(__dirname, '..', 'src');
 
   console.log('=====================================================');
@@ -297,6 +332,14 @@ function install(options = {}) {
     console.log(`      chrome-devtools-mcp is up to date (v${currentVersion}).`);
   } else {
     console.log(`      [Info] Unable to query npm registry (offline). Using installed v${currentVersion || 'unknown'}.`);
+  }
+
+  // Refresh paths in case version upgrade shifted source layout
+  paths = getAntigravityPaths();
+
+  // Clean zombie build/ directory if out/ exists
+  if (fs.existsSync(path.join(paths.cdtMcpDir, 'out')) && fs.existsSync(path.join(paths.cdtMcpDir, 'build'))) {
+    try { fs.rmSync(path.join(paths.cdtMcpDir, 'build'), { recursive: true, force: true }); } catch {}
   }
 
   // 2. Back up app.asar (only when pristine or no backup exists)
@@ -570,7 +613,7 @@ function install(options = {}) {
   // Enforce NTFS ACL permissions so non-admin processes never encounter permission quirks
   try {
     const currentUser = os.userInfo().username;
-    child_process.execSync(`icacls "${paths.edgeProfile}" /grant "${currentUser}:(OI)(CI)F" /T /C`, { stdio: 'ignore' });
+    child_process.execSync(`icacls "${paths.edgeProfile}" /grant "Everyone:(OI)(CI)F" "${currentUser}:(OI)(CI)F" /T /C`, { stdio: 'ignore' });
   } catch {}
 
   const mcpConfigDir = path.dirname(paths.mcpConfig);
@@ -588,7 +631,7 @@ function install(options = {}) {
   mcpJson.mcpServers.chrome_devtools = {
     command: "node",
     args: [
-      path.join(paths.unpackedDir, 'node_modules', 'chrome-devtools-mcp', 'build', 'src', 'bin', 'chrome-devtools-mcp.js'),
+      paths.cdtMcpEntryJs,
       "--no-usage-statistics",
       "--no-performance-crux",
       "--browserUrl",
