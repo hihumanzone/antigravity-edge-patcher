@@ -555,7 +555,9 @@ function install(options = {}) {
     const edgeLauncherCjsSrc = path.join(srcDir, 'edgeLauncher.cjs.js');
     const edgeVirtualEngineCjsSrc = path.join(srcDir, 'edgeVirtualEngine.cjs.js');
     fs.copyFileSync(edgeLauncherCjsSrc, path.join(distDir, 'edgeLauncher.js'));
+    fs.copyFileSync(edgeLauncherCjsSrc, path.join(distDir, 'edgeLauncher.cjs.js'));
     fs.copyFileSync(edgeVirtualEngineCjsSrc, path.join(distDir, 'edgeVirtualEngine.js'));
+    fs.copyFileSync(edgeVirtualEngineCjsSrc, path.join(distDir, 'edgeVirtualEngine.cjs.js'));
 
     // 5b. Patch dist/main.js
     const mainJsPath = path.join(distDir, 'main.js');
@@ -567,10 +569,10 @@ function install(options = {}) {
       if (mainContent.includes(targetPoint)) {
         mainContent = mainContent.replace(
           targetPoint,
-          targetPoint + '\n    // Auto-launch Edge for /browser slash command\n    (0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);'
+          targetPoint + '\n    // Auto-launch Edge for /browser slash command\n    (0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);\n    void edgeLauncher_1.ensureEdgeRunning().catch(() => {});'
         );
       } else {
-        mainContent += '\n(0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);\n';
+        mainContent += '\n(0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);\nvoid edgeLauncher_1.ensureEdgeRunning().catch(() => {});\n';
       }
       fs.writeFileSync(mainJsPath, mainContent, 'utf8');
     }
@@ -578,14 +580,30 @@ function install(options = {}) {
     // 5c. Patch dist/wcvBrowserRegistry.js (cookie synchronization & Edge session binding)
     const wcvRegistryPath = path.join(distDir, 'wcvBrowserRegistry.js');
     if (fs.existsSync(wcvRegistryPath)) {
-      console.log('      Patching wcvBrowserRegistry.js (Edge profile cookie synchronization)...');
+      console.log('      Patching wcvBrowserRegistry.js (Edge profile cookie synchronization & tab mirroring)...');
       let wcvContent = fs.readFileSync(wcvRegistryPath, 'utf8');
       if (!wcvContent.includes('edgeVirtualEngine')) {
         const targetListener = 'wc.setMaxListeners?.(32);';
         if (wcvContent.includes(targetListener)) {
           wcvContent = wcvContent.replace(
             targetListener,
-            targetListener + '\n        try {\n            const edgeVirtualEngine = require("./edgeVirtualEngine");\n            void edgeVirtualEngine.syncEdgeCookiesToSession(wc.session);\n            edgeVirtualEngine.setupCookieSyncWatcher(wc.session);\n        } catch (e) {\n            console.error("[EdgeVirtualEngine] Cookie sync error:", e.message);\n        }'
+            targetListener + `\n        try {
+            const edgeVirtualEngine = require("./edgeVirtualEngine");
+            void edgeVirtualEngine.syncEdgeCookiesToSession(wc.session);
+            edgeVirtualEngine.setupCookieSyncWatcher(wc.session);
+            wc.on('did-start-navigation', (_ev, url, _isInPlace, isMainFrame) => {
+                if (isMainFrame && url && !url.startsWith('about:') && !url.startsWith('chrome-extension:')) {
+                    void edgeVirtualEngine.openOrNavigateEdgeTab(url);
+                }
+            });
+            wc.on('did-navigate', (_ev, url) => {
+                if (url && !url.startsWith('about:') && !url.startsWith('chrome-extension:')) {
+                    void edgeVirtualEngine.openOrNavigateEdgeTab(url);
+                }
+            });
+        } catch (e) {
+            console.error("[EdgeVirtualEngine] Cookie sync & tab mirror error:", e.message);
+        }`
           );
         }
         const reparentPoint = 'return this.toSnapshot(existing);';

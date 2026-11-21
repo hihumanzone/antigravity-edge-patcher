@@ -1,7 +1,13 @@
 "use strict";
 
 const http = require("http");
-const launcher = require("./edgeLauncher.cjs.js");
+
+let launcher;
+try {
+  launcher = require("./edgeLauncher");
+} catch {
+  launcher = require("./edgeLauncher.cjs.js");
+}
 
 const DEFAULT_PORT = launcher.DEFAULT_PORT || 9222;
 
@@ -68,29 +74,127 @@ async function listEdgeTabs(port = DEFAULT_PORT) {
 }
 
 /**
+ * Requests Edge to create a new tab via PUT /json/new.
+ */
+async function createEdgeTab(url = "about:blank", port = DEFAULT_PORT) {
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: `/json/new?${encodeURIComponent(url)}`,
+        method: "PUT",
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch {
+            resolve(null);
+          }
+        });
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.setTimeout(2000, () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.end();
+  });
+}
+
+/**
+ * Activates an Edge tab by ID via PUT /json/activate/{id}.
+ */
+async function activateEdgeTab(tabId, port = DEFAULT_PORT) {
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: `/json/activate/${tabId}`,
+        method: "PUT",
+      },
+      () => resolve(true)
+    );
+    req.on("error", () => resolve(false));
+    req.setTimeout(1000, () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
+let _primaryEdgeTabId = null;
+
+/**
  * Gets or creates the primary active page target in Edge.
  */
 async function getPrimaryEdgePage(port = DEFAULT_PORT) {
   await launcher.ensureEdgeRunning(port);
   let tabs = await listEdgeTabs(port);
   if (tabs.length === 0) {
-    // Open a default blank page
-    tabs = await new Promise((resolve) => {
-      const req = http.get(`http://127.0.0.1:${port}/json/new?about:blank`, (res) => {
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          try {
-            resolve([JSON.parse(data)]);
-          } catch {
-            resolve([]);
-          }
-        });
-      });
-      req.on("error", () => resolve([]));
-    });
+    const newTab = await createEdgeTab("about:blank", port);
+    if (newTab) {
+      _primaryEdgeTabId = newTab.id;
+      return newTab;
+    }
+    tabs = await listEdgeTabs(port);
   }
-  return tabs[0] || null;
+  if (_primaryEdgeTabId) {
+    const found = tabs.find((t) => t.id === _primaryEdgeTabId);
+    if (found) return found;
+  }
+  const active = tabs[0] || null;
+  if (active) _primaryEdgeTabId = active.id;
+  return active;
+}
+
+/**
+ * Opens or navigates a persistent tab in Microsoft Edge to match the agent's target URL.
+ */
+async function openOrNavigateEdgeTab(url, port = DEFAULT_PORT) {
+  if (!url || url === "about:blank" || url.startsWith("chrome-extension://") || url.startsWith("devtools://")) {
+    return null;
+  }
+  try {
+    await launcher.ensureEdgeRunning(port);
+    const tabs = await listEdgeTabs(port);
+
+    let targetTab = null;
+    if (_primaryEdgeTabId) {
+      targetTab = tabs.find((t) => t.id === _primaryEdgeTabId);
+    }
+
+    // If no existing tracked tab, reuse an empty newtab/about:blank if available
+    if (!targetTab) {
+      targetTab = tabs.find(
+        (t) => t.url === "about:blank" || t.url.includes("edge://newtab") || t.url.includes("chrome://newtab")
+      );
+    }
+
+    if (targetTab && targetTab.webSocketDebuggerUrl) {
+      _primaryEdgeTabId = targetTab.id;
+      await sendCdpToTarget(targetTab.webSocketDebuggerUrl, "Page.navigate", { url });
+      await activateEdgeTab(targetTab.id, port);
+      return targetTab;
+    }
+
+    // Otherwise create a fresh persistent tab in Edge
+    targetTab = await createEdgeTab(url, port);
+    if (targetTab && targetTab.id) {
+      _primaryEdgeTabId = targetTab.id;
+      await activateEdgeTab(targetTab.id, port);
+    }
+    return targetTab;
+  } catch (err) {
+    console.error("[EdgeVirtualEngine] openOrNavigateEdgeTab error:", err.message);
+    return null;
+  }
 }
 
 /**
@@ -112,41 +216,45 @@ async function getEdgeCookies(port = DEFAULT_PORT) {
 }
 
 /**
- * Syncs all cookies from Microsoft Edge into an Electron session partition.
+ * Syncs all cookies from Microsoft Edge into an Electron session partition concurrently.
  */
 async function syncEdgeCookiesToSession(targetSession, port = DEFAULT_PORT) {
   if (!targetSession || !targetSession.cookies) {
     return 0;
   }
   const cookies = await getEdgeCookies(port);
-  let synced = 0;
-  for (const c of cookies) {
+  if (!cookies || cookies.length === 0) return 0;
+
+  const setPromises = cookies.map((c) => {
     try {
       const domainClean = c.domain.startsWith(".") ? c.domain.slice(1) : c.domain;
       const protocol = c.secure ? "https://" : "http://";
       const url = `${protocol}${domainClean}${c.path || "/"}`;
-      
+
       let sameSite = "no_restriction";
       if (c.sameSite === "Strict") sameSite = "strict";
       else if (c.sameSite === "Lax") sameSite = "lax";
 
-      await targetSession.cookies.set({
-        url,
-        name: c.name,
-        value: c.value,
-        domain: c.domain,
-        path: c.path || "/",
-        secure: Boolean(c.secure),
-        httpOnly: Boolean(c.httpOnly),
-        expirationDate: typeof c.expires === "number" && c.expires > 0 ? c.expires : undefined,
-        sameSite
-      });
-      synced++;
+      return targetSession.cookies
+        .set({
+          url,
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path || "/",
+          secure: Boolean(c.secure),
+          httpOnly: Boolean(c.httpOnly),
+          expirationDate: typeof c.expires === "number" && c.expires > 0 ? c.expires : undefined,
+          sameSite,
+        })
+        .catch(() => undefined);
     } catch {
-      // Ignore individual cookie rejection (e.g. malformed or expired)
+      return Promise.resolve();
     }
-  }
-  return synced;
+  });
+
+  await Promise.all(setPromises);
+  return cookies.length;
 }
 
 /**
@@ -177,7 +285,7 @@ function setupCookieSyncWatcher(targetSession, port = DEFAULT_PORT) {
           secure: cookie.secure,
           httpOnly: cookie.httpOnly,
           expires: cookie.expirationDate,
-          sameSite: cookie.sameSite === "strict" ? "Strict" : (cookie.sameSite === "lax" ? "Lax" : "None")
+          sameSite: cookie.sameSite === "strict" ? "Strict" : cookie.sameSite === "lax" ? "Lax" : "None",
         });
       } catch {}
     }
@@ -188,17 +296,7 @@ function setupCookieSyncWatcher(targetSession, port = DEFAULT_PORT) {
  * Navigates Edge's active page target to a URL.
  */
 async function navigateEdge(url, port = DEFAULT_PORT) {
-  const page = await getPrimaryEdgePage(port);
-  if (!page || !page.webSocketDebuggerUrl) {
-    return false;
-  }
-  try {
-    await sendCdpToTarget(page.webSocketDebuggerUrl, "Page.navigate", { url });
-    return true;
-  } catch (err) {
-    console.error("[EdgeVirtualEngine] Error navigating Edge:", err.message);
-    return false;
-  }
+  return openOrNavigateEdgeTab(url, port);
 }
 
 /**
@@ -229,7 +327,7 @@ async function captureEdgeScreenshot(format = "jpeg", quality = 80, port = DEFAU
   try {
     const res = await sendCdpToTarget(page.webSocketDebuggerUrl, "Page.captureScreenshot", {
       format,
-      quality: format === "jpeg" ? quality : undefined
+      quality: format === "jpeg" ? quality : undefined,
     });
     if (res && res.data) {
       return Buffer.from(res.data, "base64");
@@ -245,10 +343,13 @@ module.exports = {
   ensureEdgeRunning: launcher.ensureEdgeRunning,
   listEdgeTabs,
   getPrimaryEdgePage,
+  createEdgeTab,
+  activateEdgeTab,
+  openOrNavigateEdgeTab,
   getEdgeCookies,
   syncEdgeCookiesToSession,
   setupCookieSyncWatcher,
   navigateEdge,
   dispatchEdgeInput,
-  captureEdgeScreenshot
+  captureEdgeScreenshot,
 };
