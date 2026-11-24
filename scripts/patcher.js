@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const vm = require('vm');
 const child_process = require('child_process');
 
 function getAntigravityPaths() {
@@ -585,8 +586,8 @@ function install(options = {}) {
       let wcvContent = fs.readFileSync(wcvRegistryPath, 'utf8');
 
       // Suppress built-in browser WebContentsView from rendering or splitting the window
-      const syncBoundsTarget = 'if (!win || win.isDestroyed?.() || !clipView) {';
-      if (wcvContent.includes(syncBoundsTarget) && !wcvContent.includes('// Suppress built-in browser view')) {
+      const syncBoundsTarget = /if \(!win \|\| win\.isDestroyed\?\.\(\) \|\| !clipView\) \{\s*return;\s*\}/;
+      if (syncBoundsTarget.test(wcvContent) && !wcvContent.includes('// Suppress built-in browser view')) {
         wcvContent = wcvContent.replace(
           syncBoundsTarget,
           `if (!win || win.isDestroyed?.() || !clipView) {
@@ -704,6 +705,14 @@ function install(options = {}) {
       }
 
       fs.writeFileSync(wcvZOrderPath, zorderContent, 'utf8');
+    }
+
+    // Validate syntax of patched dist/*.js files before repacking
+    for (const relFile of ['main.js', 'wcvBrowserRegistry.js', 'wcvZOrderController.js', 'edgeLauncher.js', 'edgeVirtualEngine.js']) {
+      const targetJs = path.join(distDir, relFile);
+      if (fs.existsSync(targetJs)) {
+        new vm.Script(fs.readFileSync(targetJs, 'utf8'), { filename: relFile });
+      }
     }
 
     console.log('      Repacking patched app.asar with unpacked chrome-devtools-mcp...');
