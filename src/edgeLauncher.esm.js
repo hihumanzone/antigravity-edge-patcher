@@ -142,8 +142,10 @@ export async function ensureEdgeRunning(port = DEFAULT_PORT) {
       const args = [
         `--remote-debugging-port=${port}`,
         `--user-data-dir=${PROFILE_DIR}`,
+        '--profile-directory=Default',
         '--no-first-run',
         '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
         '--disable-features=msEdgeSidebarV2,msHubApps,msEdgeShoppingAssistant,msEdgeDiscoverButton,msSearchEngineChoiceScreen,msSmartScreenProtection',
         '--disable-background-networking',
         '--disable-sync',

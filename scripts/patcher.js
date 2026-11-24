@@ -275,12 +275,17 @@ function checkStatus() {
 
   checks.appAsarPatched = false;
   checks.webviewVirtualizationPatched = false;
+  checks.edgeCdpActuatorPatched = false;
+  checks.edgeCdpIsolatedWorldPatched = false;
+  checks.builtinBrowserSuppressed = false;
   if (fs.existsSync(paths.appAsar)) {
     try {
       const content = fs.readFileSync(paths.appAsar).toString('latin1');
       checks.appAsarPatched = content.includes('setupEdgeAutoLauncher');
       checks.webviewVirtualizationPatched = content.includes('edgeVirtualEngine');
-      checks.edgeCdpActuatorPatched = content.includes('dispatchEdgeInput');
+      checks.edgeCdpActuatorPatched = content.includes('dispatchAgentMouse');
+      checks.edgeCdpIsolatedWorldPatched = content.includes('executeInMainIsolatedWorld');
+      checks.builtinBrowserSuppressed = content.includes('__agySuppressBrowserPane');
     } catch {}
   }
 
@@ -294,7 +299,7 @@ function checkStatus() {
     } catch {}
   }
 
-  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.browserManagerJsPatched && checks.mcpPageJsPatched && checks.mcpContextJsPatched && checks.appAsarPatched && checks.webviewVirtualizationPatched && checks.mcpConfigConfigured;
+  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.browserManagerJsPatched && checks.mcpPageJsPatched && checks.mcpContextJsPatched && checks.appAsarPatched && checks.webviewVirtualizationPatched && checks.edgeCdpActuatorPatched && checks.edgeCdpIsolatedWorldPatched && checks.builtinBrowserSuppressed && checks.mcpConfigConfigured;
   const isCompletelyOriginal = !checks.edgeLauncherUnpackedExists && !checks.browserJsPatched && !checks.appAsarPatched && !checks.webviewVirtualizationPatched;
 
   let state = 'PARTIAL';
@@ -350,7 +355,11 @@ function install(options = {}) {
   // 2. Back up app.asar (only when pristine or no backup exists)
   const asarBuf = fs.readFileSync(paths.appAsar);
   const hasAutoLauncher = asarBuf.toString('latin1').includes('setupEdgeAutoLauncher');
-  const isAsarPatched = hasAutoLauncher && asarBuf.toString('latin1').includes('dispatchEdgeInput');
+  const asarLatin1 = asarBuf.toString('latin1');
+  const isAsarPatched = hasAutoLauncher &&
+    asarLatin1.includes('dispatchAgentMouse') &&
+    asarLatin1.includes('executeInMainIsolatedWorld') &&
+    asarLatin1.includes('__agySuppressBrowserPane');
 
   if (fs.existsSync(paths.appAsar) && !hasAutoLauncher) {
     console.log('[2/6] Backing up pristine app.asar -> app.asar.backup...');
@@ -552,8 +561,16 @@ function install(options = {}) {
 
     const distDir = path.join(tempExtractDir, 'dist');
 
+    const applyPatch = (label, src, pattern, replacement) => {
+      const matched = typeof pattern === 'string' ? src.includes(pattern) : pattern.test(src);
+      if (!matched) {
+        throw new Error(`[EdgePatcher] Failed to match patch target: ${label}`);
+      }
+      return src.replace(pattern, replacement);
+    };
+
     // 5a. Deploy edgeLauncher.js and edgeVirtualEngine.js
-    console.log('      Deploying Edge launcher & virtual engine modules to dist/...');
+    console.log('      Deploying Edge launcher & v2 Edge CDP engine modules to dist/...');
     const edgeLauncherCjsSrc = path.join(srcDir, 'edgeLauncher.cjs.js');
     const edgeVirtualEngineCjsSrc = path.join(srcDir, 'edgeVirtualEngine.cjs.js');
     fs.copyFileSync(edgeLauncherCjsSrc, path.join(distDir, 'edgeLauncher.js'));
@@ -564,7 +581,6 @@ function install(options = {}) {
     // 5b. Patch dist/main.js
     const mainJsPath = path.join(distDir, 'main.js');
     let mainContent = fs.readFileSync(mainJsPath, 'utf8');
-
     if (!mainContent.includes('setupEdgeAutoLauncher')) {
       mainContent = 'const edgeLauncher_1 = require("./edgeLauncher");\n' + mainContent;
       const targetPoint = '(0, updater_1.initAutoUpdater)(HEADLESS, settingsService);';
@@ -579,136 +595,516 @@ function install(options = {}) {
       fs.writeFileSync(mainJsPath, mainContent, 'utf8');
     }
 
-    // 5c. Patch dist/wcvBrowserRegistry.js (Suppress built-in browser view & sync cookies)
+    // 5c. Patch dist/utils.js (Keep Hub window surface opaque so no built-in browser hole ever punches through)
+    const utilsJsPath = path.join(distDir, 'utils.js');
+    if (fs.existsSync(utilsJsPath)) {
+      console.log('      Patching utils.js (Keep hub surface opaque)...');
+      let utilsContent = fs.readFileSync(utilsJsPath, 'utf8');
+      utilsContent = applyPatch(
+        'utils.setHubSurfaceTransparent',
+        utilsContent,
+        /function setHubSurfaceTransparent\(win, transparent\) \{\r?\n\s*if \(!win \|\| typeof win !== 'object'\) \{/,
+        `function setHubSurfaceTransparent(win, transparent) {\n    transparent = false;\n    if (!win || typeof win !== 'object') {`
+      );
+      fs.writeFileSync(utilsJsPath, utilsContent, 'utf8');
+    }
+
+    // 5d. Patch dist/wcvBrowserRegistry.js (Complete internal WCV suppression + Edge session binding)
     const wcvRegistryPath = path.join(distDir, 'wcvBrowserRegistry.js');
     if (fs.existsSync(wcvRegistryPath)) {
-      console.log('      Patching wcvBrowserRegistry.js (Suppressing internal webview & syncing Edge cookies)...');
+      console.log('      Patching wcvBrowserRegistry.js (Complete Two-Layer & Three-Layer suppression + Edge binding)...');
       let wcvContent = fs.readFileSync(wcvRegistryPath, 'utf8');
 
-      // Suppress built-in browser WebContentsView from rendering or splitting the window
-      const syncBoundsTarget = /if \(!win \|\| win\.isDestroyed\?\.\(\) \|\| !clipView\) \{\s*return;\s*\}/;
-      if (syncBoundsTarget.test(wcvContent) && !wcvContent.includes('// Suppress built-in browser view')) {
-        wcvContent = wcvContent.replace(
-          syncBoundsTarget,
-          `if (!win || win.isDestroyed?.() || !clipView) {
-            return;
-        }
-        // Suppress built-in browser view: Microsoft Edge is the dedicated external browser
-        try {
-            clipView.setVisible?.(false);
-            clipView.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });
-            for (const e of this.getEntriesForWindow(win)) {
-                e.view?.setVisible?.(false);
-                e.view?.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });
-            }
-        } catch {}
-        return;`
-        );
-      }
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.require',
+        wcvContent,
+        'const utils_1 = require("./utils");',
+        'const utils_1 = require("./utils");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
+      );
 
-      if (!wcvContent.includes('edgeVirtualEngine')) {
-        const targetListener = 'wc.setMaxListeners?.(32);';
-        if (wcvContent.includes(targetListener)) {
-          wcvContent = wcvContent.replace(
-            targetListener,
-            targetListener + `\n        try {
-            const edgeVirtualEngine = require("./edgeVirtualEngine");
-            void edgeVirtualEngine.syncEdgeCookiesToSession(wc.session);
-            edgeVirtualEngine.setupCookieSyncWatcher(wc.session);
-        } catch (e) {
-            console.error("[EdgeVirtualEngine] Cookie sync error:", e.message);
-        }`
-          );
-        }
-        const reparentPoint = 'return this.toSnapshot(existing);';
-        if (wcvContent.includes(reparentPoint)) {
-          wcvContent = wcvContent.replace(
-            reparentPoint,
-            'try { const edgeVirtualEngine = require("./edgeVirtualEngine"); void edgeVirtualEngine.syncEdgeCookiesToSession(existing.view.webContents.session); } catch {}\n            ' + reparentPoint
-          );
-        }
-      }
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.setRegistryRef',
+        wcvContent,
+        'exports.wcvBrowserRegistry = new WcvBrowserRegistry();',
+        'exports.wcvBrowserRegistry = new WcvBrowserRegistry();\nedgeVirtualEngine.setRegistryRef(exports.wcvBrowserRegistry);'
+      );
+
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.existingSetVisible',
+        wcvContent,
+        'existing.view.setVisible?.(true);',
+        'existing.view.setVisible?.(false);'
+      );
+
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.existingRegisterTab',
+        wcvContent,
+        'return this.toSnapshot(existing);\n        }',
+        'edgeVirtualEngine.registerTab(existing.tabKey, existing.view.webContents, hubSender, existing.lastUrl, this);\n            return this.toSnapshot(existing);\n        }'
+      );
+
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.acquireRegisterTab',
+        wcvContent,
+        'this.entries.set(request.tabKey, entry);\n        this.byWebContentsId.set(wc.id, entry);',
+        'this.entries.set(request.tabKey, entry);\n        this.byWebContentsId.set(wc.id, entry);\n        edgeVirtualEngine.registerTab(entry.tabKey, wc, hubSender, lastUrl, this);'
+      );
+
+      // Keep dummy Electron WebContents strictly on about:blank (never load real URLs or restore history internally)
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.acquireNoInternalLoad',
+        wcvContent,
+        /const restoreResult = isExternalAuth[\s\S]*?await wc\.loadURL\('about:blank'\)\.catch\(\(\) => undefined\);\s*\}\s*\}/,
+        `this.bootstrappedBlankEntries.add(entry);\n                await wc.loadURL('about:blank').catch(() => undefined);`
+      );
+
+      // Three-layer clip suppression
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.syncWindowClipAndEntryBounds',
+        wcvContent,
+        /if \(!win \|\| win\.isDestroyed\?\.\(\) \|\| !clipView\) \{\s*return;\s*\}/,
+        `if (!win || win.isDestroyed?.() || !clipView) {\n            return;\n        }\n        try {\n            clipView.setVisible?.(false);\n            clipView.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });\n            for (const e of this.getEntriesForWindow(win)) {\n                e.view?.setVisible?.(false);\n                e.view?.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });\n                clipView.removeChildView?.(e.view);\n                contentViewOf(win)?.removeChildView?.(e.view);\n            }\n        } catch {}\n        return;`
+      );
+
+      // Two-layer + show suppression (never attach child view to Electron window or make hub transparent)
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.show',
+        wcvContent,
+        /entry\.view\.webContents\.setAudioMuted\?\.\(this\.userMutedTabs\.has\(tabKey\)\);\s*const clipView = \(0, utils_1\.getHubClipView\)\(entry\.parentWindow\);[\s\S]*?this\.detachVisibleSiblings\(entry\.parentWindow, entry\);\s*return this\.toSnapshot\(entry\);\s*\}/,
+        `entry.view.webContents.setAudioMuted?.(this.userMutedTabs.has(tabKey));
+        entry.appliedBoundsDip = { x: 0, y: 0, width: 0, height: 0 };
+        this.recordNormalizedBoundsDip(entry, boundsDip, optionsDip);
+        try {
+            const clipView = (0, utils_1.getHubClipView)(entry.parentWindow);
+            clipView?.setVisible?.(false);
+            clipView?.removeChildView?.(entry.view);
+            contentViewOf(entry.parentWindow)?.removeChildView?.(entry.view);
+            entry.view?.setVisible?.(false);
+            (0, utils_1.setHubSurfaceTransparent)(entry.parentWindow, false);
+        } catch {}
+        this.detachVisibleSiblings(entry.parentWindow, entry);
+        void edgeVirtualEngine.activateTab(tabKey);
+        return this.toSnapshot(entry);
+    }`
+      );
+
+      // Suppress setBounds on Electron view
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.setBounds',
+        wcvContent,
+        /if \(entry\.visible && !entry\.view\.webContents\.isDestroyed\(\)\) \{[\s\S]*?entry\.view\.setBounds\(nextBounds\);\s*\}\s*\}/,
+        `try { entry.view?.setVisible?.(false); } catch {}`
+      );
+
+      // Suppress remote stream visible flip & parkHiddenView child attach
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.setRemoteStreamActive',
+        wcvContent,
+        /if \(next\) \{\s*entry\.view\.setVisible\?\.\(true\);\s*\}/,
+        'entry.view.setVisible?.(false);'
+      );
+
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.parkHiddenView',
+        wcvContent,
+        /contentView\?\.addChildView\?\.\(entry\.view, insertIdx\);\s*entry\.view\.setBounds\?\.\(this\.resolveHiddenBounds\(entry\)\);/,
+        'contentView?.removeChildView?.(entry.view);\n        entry.view.setVisible?.(false);'
+      );
+
+      // Clean up Edge tab on dispose
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.dispose',
+        wcvContent,
+        'const existingEntry = this.entries.get(tabKey);',
+        'edgeVirtualEngine.disposeTab(tabKey);\n        const existingEntry = this.entries.get(tabKey);'
+      );
+
+      // Reflect live Edge snapshot in toSnapshot
+      wcvContent = applyPatch(
+        'wcvBrowserRegistry.toSnapshot',
+        wcvContent,
+        /return \{\s*tabKey: entry\.tabKey,[\s\S]*?lastLoadError: entry\.lastLoadError \?\? null,\s*\};/,
+        `const edgeSnap = edgeVirtualEngine.getTabSnapshotOverride(entry.tabKey);
+        return {
+            tabKey: entry.tabKey,
+            webContentsId: entry.webContentsId,
+            url: edgeSnap?.url || (!entry.lastLoadError && hasValidLiveUrl ? liveUrl : entry.lastUrl),
+            title: edgeSnap?.title || (isAlive ? wc.getTitle?.() || '' : '') || entry.lastTitle,
+            canGoBack: edgeSnap ? Boolean(edgeSnap.canGoBack) : Boolean(history?.canGoBack?.() ?? (isAlive && wc.canGoBack?.())),
+            canGoForward: edgeSnap ? Boolean(edgeSnap.canGoForward) : Boolean(history?.canGoForward?.() ?? (isAlive && wc.canGoForward?.())),
+            isLoading: edgeSnap ? Boolean(edgeSnap.isLoading) : Boolean(isAlive && wc.isLoading?.()),
+            visible: Boolean(entry.visible),
+            pinned: Boolean(entry.pinned),
+            crashed: Boolean(entry.crashed),
+            remoteStreamActive: Boolean(entry.remoteStreamActive),
+            remoteControlActive: Boolean(entry.remoteControlActive),
+            lastHttpResponseCode: entry.lastHttpResponseCode ?? null,
+            lastLoadError: entry.lastLoadError ?? null,
+        };`
+      );
+
       fs.writeFileSync(wcvRegistryPath, wcvContent, 'utf8');
     }
 
-    // 5d. browserStream/browserViewerTabDriver.js clean passthrough
-    const bvtDriverPath = path.join(distDir, 'browserStream', 'browserViewerTabDriver.js');
-    if (fs.existsSync(bvtDriverPath)) {
-      console.log('      Verifying browserViewerTabDriver.js...');
-    }
-
-    // 5e. Patch dist/wcvZOrderController.js (Route CDP, Navigation, and Screenshots directly to Edge)
+    // 5e. Patch dist/wcvZOrderController.js (Sole Edge navigation, sequential input, screenshots & focus)
     const wcvZOrderPath = path.join(distDir, 'wcvZOrderController.js');
     if (fs.existsSync(wcvZOrderPath)) {
-      console.log('      Patching wcvZOrderController.js (CDP input, AI cursor & Edge capture)...');
+      console.log('      Patching wcvZOrderController.js (Sole Edge actuator, focus emulation & screenshots)...');
       let zorderContent = fs.readFileSync(wcvZOrderPath, 'utf8');
 
-      // Forward CDP commands directly to Edge and update AI mouse cursor
-      const sendCdpTarget = 'async sendCdp(tabKey, method, params) {';
-      if (zorderContent.includes(sendCdpTarget) && !zorderContent.includes('edgeVirtualEngine.dispatchEdgeInput')) {
-        zorderContent = zorderContent.replace(
-          sendCdpTarget,
-          `async sendCdp(tabKey, method, params) {
-        try {
-            const edgeVirtualEngine = require('./edgeVirtualEngine');
-            if (method && method.startsWith('Input.')) {
-                void edgeVirtualEngine.dispatchEdgeInput(method, params);
-            } else if (method === 'Page.navigate' && params && params.url) {
-                void edgeVirtualEngine.navigateEdge(params.url);
-            } else {
-                void edgeVirtualEngine.sendCdpToEdge(method, params);
-            }
-        } catch {}`
-        );
-      }
+      zorderContent = applyPatch(
+        'wcvZOrderController.require',
+        zorderContent,
+        'const utils_1 = require("./utils");',
+        'const utils_1 = require("./utils");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
+      );
 
-      // Route tab navigation directly to Edge
-      const navTarget = 'async navigate(tabKey, url) {';
-      if (zorderContent.includes(navTarget) && !zorderContent.includes('edgeVirtualEngine.navigateEdge(url)')) {
-        zorderContent = zorderContent.replace(
-          navTarget,
-          `async navigate(tabKey, url) {
-        try {
-            const edgeVirtualEngine = require('./edgeVirtualEngine');
-            void edgeVirtualEngine.navigateEdge(url);
-        } catch {}`
-        );
-      }
+      // Disable OS catcher hover forwarding to Edge so user's mouse never drives Edge cursor
+      zorderContent = applyPatch(
+        'wcvZOrderController.fireHover',
+        zorderContent,
+        'fireHover(k, x, y, m, oob = false, done) {',
+        'fireHover(k, x, y, m, oob = false, done) {\n        if (done) { void Promise.resolve().then(done); }\n        return;'
+      );
 
-      // Capture screenshot directly from Edge
-      const captureTarget = 'async capturePageImage(tabKey) {';
-      if (zorderContent.includes(captureTarget) && !zorderContent.includes('edgeVirtualEngine.captureEdgePageNativeImage')) {
-        zorderContent = zorderContent.replace(
-          captureTarget,
-          `async capturePageImage(tabKey) {
+      // Sync focus emulation & AI cursor on agent control transitions
+      zorderContent = applyPatch(
+        'wcvZOrderController.setAgentControlling',
+        zorderContent,
+        "this.reconcileWindow(entry.parentWindow, isActive ? 'agent-controlling' : 'agent-controlling-ended');",
+        "this.reconcileWindow(entry.parentWindow, isActive ? 'agent-controlling' : 'agent-controlling-ended');\n        void edgeVirtualEngine.setAgentControlling(tabKey, isActive);"
+      );
+
+      // Forward agent mouse sequentially directly to Edge without Electron pane clamping
+      zorderContent = applyPatch(
+        'wcvZOrderController.dispatchMouseEvent',
+        zorderContent,
+        /async dispatchMouseEvent\(tabKey, params, options\) \{[\s\S]*?finally \{\s*if \(rec\.webContentsId === wcId && rec\.cdpMouseInFlight > 0\) \{\s*rec\.cdpMouseInFlight--;\s*\}\s*\}\s*\}/,
+        `async dispatchMouseEvent(tabKey, params, options) {
+        const entry = this.registry.getEntry(tabKey);
+        if (!entry || entry.view.webContents.isDestroyed()) {
+            return;
+        }
+        if (options?.allowOutOfBounds && !entry.isAgentStepActive) {
+            return;
+        }
+        return edgeVirtualEngine.dispatchAgentMouse(tabKey, params);
+    }`
+      );
+
+      zorderContent = applyPatch(
+        'wcvZOrderController.dispatchKeyEvent',
+        zorderContent,
+        /async dispatchKeyEvent\(tabKey, params\) \{[\s\S]*?await this\.sendCdp\(tabKey, 'Input\.dispatchKeyEvent', cdpParams\);\s*\}/,
+        `async dispatchKeyEvent(tabKey, params) {
+        return edgeVirtualEngine.dispatchAgentKey(tabKey, params);
+    }`
+      );
+
+      zorderContent = applyPatch(
+        'wcvZOrderController.insertText',
+        zorderContent,
+        /async insertText\(tabKey, text\) \{\s*await this\.sendCdp\(tabKey, 'Input\.insertText', \{ text \}\);\s*\}/,
+        `async insertText(tabKey, text) {
+        return edgeVirtualEngine.insertEdgeText(tabKey, text);
+    }`
+      );
+
+      zorderContent = applyPatch(
+        'wcvZOrderController.capturePageImage',
+        zorderContent,
+        'async capturePageImage(tabKey) {',
+        `async capturePageImage(tabKey) {
         try {
-            const edgeVirtualEngine = require('./edgeVirtualEngine');
-            const edgeShot = await edgeVirtualEngine.captureEdgePageNativeImage(electron_1.nativeImage);
+            const edgeShot = await edgeVirtualEngine.captureEdgePageNativeImage(electron_1.nativeImage, tabKey);
             if (edgeShot && !edgeShot.isEmpty?.()) {
                 return edgeShot;
             }
-        } catch {}`
-        );
-      }
-
-      // Ensure clean cookie synchronization on navigation without phantom window launching
-      const authBlock = 'if ((0, webviewBrowser_1.isExternalOnlyAuthUrl)(url)) {';
-      if (zorderContent.includes(authBlock) && !zorderContent.includes('syncEdgeCookiesToSession')) {
-        zorderContent = zorderContent.replace(
-          authBlock,
-          `try {
-            const edgeVirtualEngine = require('./edgeVirtualEngine');
-            void edgeVirtualEngine.syncEdgeCookiesToSession(entry.view.webContents.session);
         } catch {}
-        ` + authBlock
-        );
-      }
+        return null;`
+      );
+
+      // Route navigate() exclusively to Edge without calling internal wc.loadURL()
+      zorderContent = applyPatch(
+        'wcvZOrderController.navigate',
+        zorderContent,
+        /async navigate\(tabKey, url\) \{[\s\S]*?if \(!\(0, webviewBrowser_1\.validateWebviewNavigationUrl\)\(url, 'http:\/\/127\.0\.0\.1'\)\.allowed\) \{\s*return false;\s*\}/,
+        `async navigate(tabKey, url) {
+        const entry = this.registry.getEntry(tabKey);
+        if (!entry || entry.view.webContents.isDestroyed()) {
+            return false;
+        }
+        if ((0, webviewBrowser_1.isExternalOnlyAuthUrl)(url)) {
+            void this.registry.openExternalUrl(url);
+            return false;
+        }
+        if (!(0, webviewBrowser_1.validateWebviewNavigationUrl)(url, 'http://127.0.0.1').allowed) {
+            return false;
+        }
+        this.registry.noteExternalNavigation(tabKey, url);
+        return edgeVirtualEngine.navigateTab(tabKey, url);
+        if (false)`
+      );
 
       fs.writeFileSync(wcvZOrderPath, zorderContent, 'utf8');
     }
 
-    // Validate syntax of patched dist/*.js files before repacking
-    for (const relFile of ['main.js', 'wcvBrowserRegistry.js', 'wcvZOrderController.js', 'edgeLauncher.js', 'edgeVirtualEngine.js']) {
+    // 5f. Patch dist/wcvIpcHandlers.js (Forward cursor state pushes, navigation controls & raw agent mouse coords)
+    const wcvIpcPath = path.join(distDir, 'wcvIpcHandlers.js');
+    if (fs.existsSync(wcvIpcPath)) {
+      console.log('      Patching wcvIpcHandlers.js (Cursor state sync, wcv:control & raw coords)...');
+      let wcvIpcContent = fs.readFileSync(wcvIpcPath, 'utf8');
+
+      wcvIpcContent = applyPatch(
+        'wcvIpcHandlers.require',
+        wcvIpcContent,
+        'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");',
+        'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
+      );
+
+      wcvIpcContent = applyPatch(
+        'wcvIpcHandlers.dropCursor',
+        wcvIpcContent,
+        'const drop = (k) => void (cursors.delete(k) && emit(k, null));',
+        'const drop = (k) => void (edgeVirtualEngine.updateCursorState(k, null), cursors.delete(k) && emit(k, null));'
+      );
+
+      wcvIpcContent = applyPatch(
+        'wcvIpcHandlers.pushCursor',
+        wcvIpcContent,
+        'cursors.set(k, { state, webContentsId, hubSenderId: hubSender.id });',
+        'cursors.set(k, { state, webContentsId, hubSenderId: hubSender.id });\n        edgeVirtualEngine.updateCursorState(k, state);'
+      );
+
+      wcvIpcContent = applyPatch(
+        'wcvIpcHandlers.control',
+        wcvIpcContent,
+        'const history = wc.navigationHistory;',
+        `if (['goBack', 'back', 'goForward', 'forward', 'reload', 'stop'].includes(action) && edgeVirtualEngine.hasTab(tabKey)) {
+            return edgeVirtualEngine.controlTab(tabKey, action);
+        }
+        const history = wc.navigationHistory;`
+      );
+
+      wcvIpcContent = applyPatch(
+        'wcvIpcHandlers.sendMouse',
+        wcvIpcContent,
+        'return controller.dispatchMouseEvent(tabKey, hubCssMouseToDip(event, params, coordSpace));',
+        `const entry = registry.getEntry(tabKey);
+            const mapped = entry?.isAgentStepActive ? params : hubCssMouseToDip(event, params, coordSpace);
+            return controller.dispatchMouseEvent(tabKey, mapped);`
+      );
+
+      wcvIpcContent = applyPatch(
+        'wcvIpcHandlers.setViewportSize',
+        wcvIpcContent,
+        'return controller.setViewportSize(tabKey, size);',
+        `if (edgeVirtualEngine.hasTab(tabKey)) {\n            return null;\n        }\n        return controller.setViewportSize(tabKey, size);`
+      );
+
+      fs.writeFileSync(wcvIpcPath, wcvIpcContent, 'utf8');
+    }
+
+    // 5g. Patch dist/ipcHandlers.js (Route isolated-world JS, frames, network, dialogs, uploads directly to Edge)
+    const ipcHandlersPath = path.join(distDir, 'ipcHandlers.js');
+    if (fs.existsSync(ipcHandlersPath)) {
+      console.log('      Patching ipcHandlers.js (DOM/JS isolated worlds, OOPIFs, network, dialogs & uploads)...');
+      let ipcContent = fs.readFileSync(ipcHandlersPath, 'utf8');
+
+      ipcContent = applyPatch(
+        'ipcHandlers.require',
+        ipcContent,
+        'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");',
+        'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.executeJsIsolatedWorld',
+        ipcContent,
+        'return (0, isolatedWorldExec_1.executeJavaScriptInIsolatedWorldWhenReady)(wc, worldId, [{ code }], false);',
+        `if (edgeVirtualEngine.hasTabByWcId(webContentsId)) {
+            return edgeVirtualEngine.executeInMainIsolatedWorld(webContentsId, worldId, code);
+        }
+        return (0, isolatedWorldExec_1.executeJavaScriptInIsolatedWorldWhenReady)(wc, worldId, [{ code }], false);`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.getNetworkRequests',
+        ipcContent,
+        'return guestNetworkController_1.guestNetworkController.getRequests(wc.id);',
+        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+            return edgeVirtualEngine.getNetworkRequests(wc.id);
+        }
+        return guestNetworkController_1.guestNetworkController.getRequests(wc.id);`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.clearNetworkRequests',
+        ipcContent,
+        'return guestNetworkController_1.guestNetworkController.clearRequests(wc.id);',
+        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+            return edgeVirtualEngine.clearNetworkRequests(wc.id);
+        }
+        return guestNetworkController_1.guestNetworkController.clearRequests(wc.id);`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.setDialogPolicy',
+        ipcContent,
+        'return guestDialogController_1.guestDialogController.setPolicy(wc, sender, safePolicy);',
+        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+            return edgeVirtualEngine.setDialogPolicy(wc.id, safePolicy);
+        }
+        return guestDialogController_1.guestDialogController.setPolicy(wc, sender, safePolicy);`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.handleDialog',
+        ipcContent,
+        'return guestDialogController_1.guestDialogController.handleDialog(wc, {',
+        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+            return edgeVirtualEngine.handleJavaScriptDialog(wc.id, {
+                ...(typeof decision?.dialogId === 'string' ? { dialogId: decision.dialogId } : {}),
+                accept: Boolean(decision?.accept),
+                ...(typeof decision?.promptText === 'string' ? { promptText: decision.promptText } : {}),
+            });
+        }
+        return guestDialogController_1.guestDialogController.handleDialog(wc, {`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.setFileChooserPolicy',
+        ipcContent,
+        'return guestFileChooserController_1.guestFileChooserController.setPolicy(wc, sender, {',
+        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+            return edgeVirtualEngine.setFileChooserPolicy(wc.id, {
+                enabled: Boolean(policy?.enabled),
+                ...(typeof policy?.tabKey === 'string' ? { tabKey: policy.tabKey } : {}),
+            });
+        }
+        return guestFileChooserController_1.guestFileChooserController.setPolicy(wc, sender, {`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.handleFileChooser',
+        ipcContent,
+        'return guestFileChooserController_1.guestFileChooserController.handleFileChooser(wc, pinned);',
+        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+            return edgeVirtualEngine.handleFileChooser(wc.id, pinned);
+        }
+        return guestFileChooserController_1.guestFileChooserController.handleFileChooser(wc, pinned);`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.setInputFiles',
+        ipcContent,
+        'return guestFileChooserController_1.guestFileChooserController.setInputFiles(wc, {',
+        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+            return edgeVirtualEngine.setInputFiles(wc.id, {
+                ...request,
+                allowedUploadsDir: pinUploadsRoot(request?.expectedConversationId),
+            });
+        }
+        return guestFileChooserController_1.guestFileChooserController.setInputFiles(wc, {`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.listFrames',
+        ipcContent,
+        "localOnly('webview:list-frames', async (event, wcId, options) => guestFrameBridge_1.guestFrameBridge.listFrames(assertMainFrameGuestCaller(event, wcId, 'webview:list-frames'), options));",
+        `localOnly('webview:list-frames', async (event, wcId, options) => {
+        const wc = assertMainFrameGuestCaller(event, wcId, 'webview:list-frames');
+        if (edgeVirtualEngine.hasTabByWcId(wcId)) {
+            return edgeVirtualEngine.listFrames(wcId, options);
+        }
+        return guestFrameBridge_1.guestFrameBridge.listFrames(wc, options);
+    });`
+      );
+
+      ipcContent = applyPatch(
+        'ipcHandlers.executeFrameIsolatedWorld',
+        ipcContent,
+        'return guestFrameBridge_1.guestFrameBridge.executeInFrameIsolatedWorld(wc, frameId, code, expectedOrigin, options);',
+        `if (edgeVirtualEngine.hasTabByWcId(wcId)) {
+            return edgeVirtualEngine.executeInFrameIsolatedWorld(wcId, frameId, code, expectedOrigin, options);
+        }
+        return guestFrameBridge_1.guestFrameBridge.executeInFrameIsolatedWorld(wc, frameId, code, expectedOrigin, options);`
+      );
+
+      fs.writeFileSync(ipcHandlersPath, ipcContent, 'utf8');
+    }
+
+    // 5h. Patch dist/preload.js (Safely hide built-in browser pane UI without stopping agent)
+    const preloadPath = path.join(distDir, 'preload.js');
+    if (fs.existsSync(preloadPath)) {
+      console.log('      Patching preload.js (Suppress built-in browser pane UI safely)...');
+      let preloadContent = fs.readFileSync(preloadPath, 'utf8');
+      preloadContent = applyPatch(
+        'preload.installHoleReporter',
+        preloadContent,
+        'installWcvThreeLayerHoleReporter();',
+        `installEdgeOnlyBrowserSuppressor();`
+      );
+      preloadContent = applyPatch(
+        'preload.defineSuppressor',
+        preloadContent,
+        'if (!isRemoteWindow) {',
+        `function installEdgeOnlyBrowserSuppressor() {
+    const script = \`(() => {
+      try {
+        window.__agySuppressBrowserPane = true;
+        if (window.__agySuppressInstalled) return;
+        window.__agySuppressInstalled = true;
+        const styleId = '__agy_edge_only_hide_builtin_browser';
+        const ensureStyle = () => {
+          if (document.getElementById(styleId) || !document.head) return;
+          const st = document.createElement('style');
+          st.id = styleId;
+          st.textContent = '[data-browser-hole] { visibility: hidden !important; pointer-events: none !important; opacity: 0 !important; }';
+          document.head.appendChild(st);
+        };
+        let scheduled = false;
+        const suppress = () => {
+          scheduled = false;
+          ensureStyle();
+          const holes = document.querySelectorAll('[data-browser-hole]');
+          for (const hole of holes) {
+            // Walk up up to 4 ancestors to collapse pure browser-pane wrapper without hurting chat/agent tabs
+            let node = hole;
+            for (let i = 0; i < 4 && node && node.parentElement; i++) {
+              const txt = (node.textContent || '').trim();
+              if (node.querySelector('[role="tablist"]') || txt.length > 800) break;
+              node = node.parentElement;
+            }
+            if (node && node !== document.body && node !== document.documentElement) {
+              if (!node.querySelector('[data-testid*="chat"], textarea')) {
+                node.style.display = 'none';
+              }
+            }
+          }
+        };
+        const schedule = () => {
+          if (!scheduled) { scheduled = true; requestAnimationFrame(suppress); }
+        };
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', schedule, { once: true });
+        } else {
+          schedule();
+        }
+        new MutationObserver(schedule).observe(document.documentElement || document, { childList: true, subtree: true });
+      } catch {}
+    })();\`;
+    const inject = () => { void electron_1.webFrame?.executeJavaScript?.(script).catch(() => undefined); };
+    if (document?.documentElement) inject();
+    else window?.addEventListener?.('DOMContentLoaded', inject, { once: true });
+}
+if (!isRemoteWindow) {`
+      );
+      fs.writeFileSync(preloadPath, preloadContent, 'utf8');
+    }
+
+    // Validate syntax of all patched dist/*.js files before repacking
+    for (const relFile of ['main.js', 'utils.js', 'preload.js', 'wcvBrowserRegistry.js', 'wcvZOrderController.js', 'wcvIpcHandlers.js', 'ipcHandlers.js', 'edgeLauncher.js', 'edgeVirtualEngine.js']) {
       const targetJs = path.join(distDir, relFile);
       if (fs.existsSync(targetJs)) {
         new vm.Script(fs.readFileSync(targetJs, 'utf8'), { filename: relFile });
