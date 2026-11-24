@@ -105,6 +105,7 @@ export function syncDevToolsActivePort(port, wsUrl) {
 }
 
 let _edgeProcess = null;
+let _launchPromise = null;
 
 export async function ensureEdgeRunning(port = DEFAULT_PORT) {
   const existingVersion = await isEdgeRunning(port);
@@ -113,67 +114,85 @@ export async function ensureEdgeRunning(port = DEFAULT_PORT) {
     return true;
   }
 
-  const edgeExe = findEdgeExecutable();
-  if (!edgeExe) {
-    throw new Error('Microsoft Edge executable was not found on this system');
+  if (_launchPromise) {
+    return _launchPromise;
   }
 
-  try {
-    if (!fs.existsSync(PROFILE_DIR)) fs.mkdirSync(PROFILE_DIR, { recursive: true });
-  } catch {}
-
-  try {
-    if (!fs.existsSync(CHROME_USER_DATA_DIR)) fs.mkdirSync(CHROME_USER_DATA_DIR, { recursive: true });
-  } catch {}
-
-  const args = [
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${PROFILE_DIR}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-features=msEdgeSidebarV2,msHubApps,msEdgeShoppingAssistant,msEdgeDiscoverButton,msSearchEngineChoiceScreen,msSmartScreenProtection',
-    '--disable-background-networking',
-    '--disable-sync',
-    '--disable-default-apps',
-    '--disable-translate',
-    '--disable-client-side-phishing-detection',
-    '--disable-component-update',
-    '--disable-domain-reliability',
-    '--metrics-recording-only',
-    '--no-report-upload'
-  ];
-
-  _edgeProcess = child_process.spawn(edgeExe, args, {
-    detached: true,
-    stdio: 'ignore'
-  });
-  _edgeProcess.unref();
-
-  _edgeProcess.on('exit', () => {
-    _edgeProcess = null;
-  });
-
-  const startTime = Date.now();
-  while (Date.now() - startTime < 8000) {
-    await new Promise(r => setTimeout(r, 100));
-    const version = await isEdgeRunning(port);
-    if (version && version.webSocketDebuggerUrl) {
-      syncDevToolsActivePort(port, version.webSocketDebuggerUrl);
-
-      // Page Readiness Barrier: wait a moment for Edge's initial tab to transition beyond empty/about:blank
-      const pageDeadline = Date.now() + 1000;
-      while (Date.now() < pageDeadline) {
-        const pages = await getEdgePageTargets(port);
-        if (pages.length > 0 && pages.some(p => p.url && p.url !== 'about:blank')) {
-          break;
-        }
-        await new Promise(r => setTimeout(r, 25));
+  _launchPromise = (async () => {
+    try {
+      const checkAgain = await isEdgeRunning(port);
+      if (checkAgain && checkAgain.webSocketDebuggerUrl) {
+        syncDevToolsActivePort(port, checkAgain.webSocketDebuggerUrl);
+        return true;
       }
 
-      console.error(`[EdgeLauncher] Microsoft Edge launched with remote debugging on port ${port}`);
-      return true;
-    }
-  }
+      const edgeExe = findEdgeExecutable();
+      if (!edgeExe) {
+        throw new Error('Microsoft Edge executable was not found on this system');
+      }
 
-  throw new Error(`Timeout waiting for Microsoft Edge on port ${port}`);
+      try {
+        if (!fs.existsSync(PROFILE_DIR)) fs.mkdirSync(PROFILE_DIR, { recursive: true });
+      } catch {}
+
+      try {
+        if (!fs.existsSync(CHROME_USER_DATA_DIR)) fs.mkdirSync(CHROME_USER_DATA_DIR, { recursive: true });
+      } catch {}
+
+      const args = [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${PROFILE_DIR}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-features=msEdgeSidebarV2,msHubApps,msEdgeShoppingAssistant,msEdgeDiscoverButton,msSearchEngineChoiceScreen,msSmartScreenProtection',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--disable-default-apps',
+        '--disable-translate',
+        '--disable-client-side-phishing-detection',
+        '--disable-component-update',
+        '--disable-domain-reliability',
+        '--metrics-recording-only',
+        '--no-report-upload'
+      ];
+
+      _edgeProcess = child_process.spawn(edgeExe, args, {
+        detached: true,
+        stdio: 'ignore'
+      });
+      _edgeProcess.unref();
+
+      _edgeProcess.on('exit', () => {
+        _edgeProcess = null;
+      });
+
+      const startTime = Date.now();
+      while (Date.now() - startTime < 8000) {
+        await new Promise(r => setTimeout(r, 100));
+        const version = await isEdgeRunning(port);
+        if (version && version.webSocketDebuggerUrl) {
+          syncDevToolsActivePort(port, version.webSocketDebuggerUrl);
+
+          // Page Readiness Barrier: wait a moment for Edge's initial tab to transition beyond empty/about:blank
+          const pageDeadline = Date.now() + 1000;
+          while (Date.now() < pageDeadline) {
+            const pages = await getEdgePageTargets(port);
+            if (pages.length > 0 && pages.some(p => p.url && p.url !== 'about:blank')) {
+              break;
+            }
+            await new Promise(r => setTimeout(r, 25));
+          }
+
+          console.error(`[EdgeLauncher] Microsoft Edge launched with remote debugging on port ${port}`);
+          return true;
+        }
+      }
+
+      throw new Error(`Timeout waiting for Microsoft Edge on port ${port}`);
+    } finally {
+      _launchPromise = null;
+    }
+  })();
+
+  return _launchPromise;
 }

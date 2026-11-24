@@ -577,10 +577,10 @@ function install(options = {}) {
       fs.writeFileSync(mainJsPath, mainContent, 'utf8');
     }
 
-    // 5c. Patch dist/wcvBrowserRegistry.js (cookie synchronization & Edge session binding)
+    // 5c. Patch dist/wcvBrowserRegistry.js (clean session cookie synchronization without duplicate window mirroring)
     const wcvRegistryPath = path.join(distDir, 'wcvBrowserRegistry.js');
     if (fs.existsSync(wcvRegistryPath)) {
-      console.log('      Patching wcvBrowserRegistry.js (Edge profile cookie synchronization & tab mirroring)...');
+      console.log('      Patching wcvBrowserRegistry.js (Edge profile cookie synchronization)...');
       let wcvContent = fs.readFileSync(wcvRegistryPath, 'utf8');
       if (!wcvContent.includes('edgeVirtualEngine')) {
         const targetListener = 'wc.setMaxListeners?.(32);';
@@ -591,18 +591,8 @@ function install(options = {}) {
             const edgeVirtualEngine = require("./edgeVirtualEngine");
             void edgeVirtualEngine.syncEdgeCookiesToSession(wc.session);
             edgeVirtualEngine.setupCookieSyncWatcher(wc.session);
-            wc.on('did-start-navigation', (_ev, url, _isInPlace, isMainFrame) => {
-                if (isMainFrame && url && !url.startsWith('about:') && !url.startsWith('chrome-extension:')) {
-                    void edgeVirtualEngine.openOrNavigateEdgeTab(url);
-                }
-            });
-            wc.on('did-navigate', (_ev, url) => {
-                if (url && !url.startsWith('about:') && !url.startsWith('chrome-extension:')) {
-                    void edgeVirtualEngine.openOrNavigateEdgeTab(url);
-                }
-            });
         } catch (e) {
-            console.error("[EdgeVirtualEngine] Cookie sync & tab mirror error:", e.message);
+            console.error("[EdgeVirtualEngine] Cookie sync error:", e.message);
         }`
           );
         }
@@ -617,28 +607,10 @@ function install(options = {}) {
       }
     }
 
-    // 5d. Patch dist/browserStream/browserViewerTabDriver.js (forwarding reload/navigate only without duplicate input dispatch)
+    // 5d. browserStream/browserViewerTabDriver.js clean passthrough
     const bvtDriverPath = path.join(distDir, 'browserStream', 'browserViewerTabDriver.js');
     if (fs.existsSync(bvtDriverPath)) {
-      console.log('      Patching browserViewerTabDriver.js (Edge state synchronization)...');
-      let bvtContent = fs.readFileSync(bvtDriverPath, 'utf8');
-      if (!bvtContent.includes('edgeVirtualEngine')) {
-        const execTarget = 'async executeControlOperation(tabId, entry, op) {';
-        if (bvtContent.includes(execTarget)) {
-          bvtContent = bvtContent.replace(
-            execTarget,
-            execTarget + `\n        try {
-            const edgeVirtualEngine = require('../edgeVirtualEngine');
-            if (op.kind === 'navigate') {
-                void edgeVirtualEngine.navigateEdge(op.url);
-            }
-        } catch (e) {
-            console.error('[EdgeVirtualEngine] Navigation sync error:', e.message);
-        }`
-          );
-          fs.writeFileSync(bvtDriverPath, bvtContent, 'utf8');
-        }
-      }
+      console.log('      Verifying browserViewerTabDriver.js...');
     }
 
     // 5e. Patch dist/wcvZOrderController.js (ensuring external auth URLs route to Edge smoothly)
