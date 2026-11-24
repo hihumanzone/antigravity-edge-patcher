@@ -1,40 +1,19 @@
 #!/usr/bin/env node
-const fs = require('fs');
 const patcher = require('./patcher');
 
 const res = patcher.checkStatus();
 console.log('=====================================================');
-console.log('  Antigravity Edge Integration Status');
+console.log('  Antigravity Edge Integration Status (v3)');
 console.log('=====================================================\n');
 console.log(`Overall Status: [${res.state}]\n`);
 console.log('Component Checks:');
 console.log(`  - Antigravity Installation : ${res.checks.antigravityInstalled ? 'OK' : 'NOT FOUND'}`);
 console.log(`  - app.asar Present         : ${res.checks.appAsarExists ? 'OK' : 'MISSING'}`);
 console.log(`  - app.asar Backup Present  : ${res.checks.appAsarBackupExists ? 'YES' : 'NO'}`);
-console.log(`  - app.asar Patched         : ${res.checks.appAsarPatched ? 'PATCHED (Edge Auto-launcher active)' : 'ORIGINAL (Chrome default)'}`);
-console.log(`  - Webview Virtualization   : ${res.checks.webviewVirtualizationPatched ? 'PATCHED (v2 Edge CDP Engine)' : 'NOT PATCHED'}`);
-console.log(`  - Edge Actuator & AI Cursor: ${res.checks.edgeCdpActuatorPatched ? 'PATCHED (Sole Edge input + AI cursor)' : 'NOT PATCHED'}`);
-console.log(`  - Edge Isolated World & DOM: ${res.checks.edgeCdpIsolatedWorldPatched ? 'PATCHED (Edge DOM/frames routed)' : 'NOT PATCHED'}`);
-console.log(`  - Built-in Browser Removed : ${res.checks.builtinBrowserSuppressed ? 'SUPPRESSED (No internal pane/view)' : 'NOT SUPPRESSED'}`);
-console.log(`  - Edge Launcher in Unpacked: ${res.checks.edgeLauncherUnpackedExists ? 'DEPLOYED' : 'NOT DEPLOYED'}`);
-const mcpVerStr = res.checks.cdtMcpVersion
-  ? `v${res.checks.cdtMcpVersion}${res.checks.cdtMcpLatestVersion ? ` (latest: v${res.checks.cdtMcpLatestVersion})` : ''}`
-  : 'NOT FOUND';
-console.log(`  - chrome-devtools-mcp      : ${mcpVerStr}`);
-console.log(`  - MCP Entrypoint Script    : ${fs.existsSync(res.paths.cdtMcpEntryJs) ? 'OK' : 'MISSING'} (${res.paths.cdtMcpEntryJs})`);
-if (fs.existsSync(res.paths.browserJs)) {
-  console.log(`  - browser.js Patched       : ${res.checks.browserJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
-}
-if (res.checks.browserManagerJsPatched !== undefined) {
-  console.log(`  - BrowserManager.js Patched: ${res.checks.browserManagerJsPatched ? 'PATCHED (Edge port 9222)' : 'ORIGINAL (Chrome default)'}`);
-}
-if (res.checks.mcpPageJsPatched !== undefined) {
-  console.log(`  - McpPage.js Patched       : ${res.checks.mcpPageJsPatched ? 'PATCHED (URL fallback active)' : 'ORIGINAL'}`);
-}
-if (res.checks.mcpContextJsPatched !== undefined) {
-  console.log(`  - McpContext.js Patched    : ${res.checks.mcpContextJsPatched ? 'PATCHED (Target filter active)' : 'ORIGINAL'}`);
-}
-console.log(`  - MCP Server Configured    : ${res.checks.mcpConfigConfigured ? 'YES (chrome_devtools active)' : 'NO'}`);
+console.log(`  - Edge CDP Engine (v3)     : ${res.checks.edgeCdpEnginePatched ? 'PATCHED (Direct Edge CDP + AI Cursor)' : 'NOT PATCHED'}`);
+console.log(`  - Edge Isolated World/DOM  : ${res.checks.edgeCdpIsolatedWorldPatched ? 'PATCHED (Edge DOM/OOPIFs routed)' : 'NOT PATCHED'}`);
+console.log(`  - Edge Companion Card UI   : ${res.checks.edgeCompanionUiPatched ? 'PATCHED (Synced Preview & Focus Edge)' : 'NOT PATCHED'}`);
+console.log(`  - Legacy MCP Bloat Cleaned : ${res.checks.legacyMcpCleaned ? 'CLEAN (No chrome_devtools MCP config)' : 'LEGACY ENTRIES PRESENT'}`);
 console.log('\nPaths:');
 console.log(`  - Antigravity Base: ${res.paths.baseDir}`);
 console.log(`  - Edge Profile Dir: ${res.paths.edgeProfile}`);

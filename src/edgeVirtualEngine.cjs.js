@@ -370,16 +370,17 @@ class CdpWebSocket {
 const AI_CURSOR_BOOTSTRAP_FN = `(function() {
   try {
     const ROOT_ATTR = 'data-antigravity-cursor-host';
-    if (!document || !document.documentElement) return;
     if (!globalThis.__agyCursorState) {
       globalThis.__agyCursorState = {
-        x: -100, y: -100, visible: false, phase: 'idle', hideTimer: null,
-        host: null, cursorEl: null, rippleEl: null, arrowEl: null
+        x: -100, y: -100, visible: false, phase: 'idle', label: '', hideTimer: null,
+        host: null, cursorEl: null, rippleEl: null, pillEl: null
       };
     }
     const st = globalThis.__agyCursorState;
     function ensureDom() {
       if (st.host && st.host.isConnected && st.cursorEl) return true;
+      const mount = document && (document.documentElement || document.body);
+      if (!mount) return false;
       let host = document.querySelector('[' + ROOT_ATTR + ']');
       if (!host) {
         host = document.createElement('div');
@@ -388,39 +389,54 @@ const AI_CURSOR_BOOTSTRAP_FN = `(function() {
         host.style.cssText = 'all:initial !important;position:fixed !important;inset:0 !important;width:0 !important;height:0 !important;pointer-events:none !important;z-index:2147483647 !important;overflow:visible !important;';
         const shadow = host.attachShadow({ mode: 'closed' });
         shadow.innerHTML = '<style>' +
-          '.agy-c{position:fixed;top:0;left:0;width:28px;height:28px;pointer-events:none;user-select:none;opacity:0;transform:translate3d(-100px,-100px,0);transition:transform 65ms cubic-bezier(.22,1,.36,1),opacity 140ms ease;will-change:transform,opacity;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.42));}' +
+          '.agy-c{position:fixed;top:0;left:0;display:flex;align-items:flex-start;gap:6px;pointer-events:none;user-select:none;opacity:0;transform:translate3d(-100px,-100px,0);transition:transform 75ms cubic-bezier(.22,1,.36,1),opacity 160ms ease;will-change:transform,opacity;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.45));}' +
           '.agy-c.vis{opacity:1;}' +
-          '.agy-arrow{transform-origin:2px 2px;transition:transform 90ms ease;}' +
+          '.agy-ptr{position:relative;width:24px;height:24px;flex-shrink:0;}' +
+          '.agy-arrow{transform-origin:3px 2px;transition:transform 90ms ease;}' +
           '.agy-c.down .agy-arrow{transform:scale(0.84);}' +
-          '.agy-ring{position:absolute;top:-10px;left:-10px;width:24px;height:24px;border-radius:9999px;border:2px solid rgba(56,189,248,0.92);background:rgba(56,189,248,0.22);opacity:0;transform:scale(0.3);pointer-events:none;}' +
-          '.agy-ring.pop{animation:agy-pop 340ms cubic-bezier(.16,1,.3,1) forwards;}' +
-          '@keyframes agy-pop{0%{opacity:0.95;transform:scale(0.3);}100%{opacity:0;transform:scale(1.65);}}' +
+          '.agy-ring{position:absolute;top:-9px;left:-9px;width:24px;height:24px;border-radius:9999px;border:2px solid rgba(56,189,248,0.95);background:rgba(56,189,248,0.24);opacity:0;transform:scale(0.3);pointer-events:none;}' +
+          '.agy-ring.pop{animation:agy-pop 380ms cubic-bezier(.16,1,.3,1) forwards;}' +
+          '.agy-pill{margin-top:16px;padding:3px 9px;border-radius:9999px;background:rgba(15,23,42,0.9);border:1px solid rgba(56,189,248,0.45);color:#f1f5f9;font:600 11px/1.25 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;white-space:nowrap;letter-spacing:0.01em;box-shadow:0 4px 12px rgba(0,0,0,0.35);backdrop-filter:blur(6px);display:none;}' +
+          '.agy-pill.show{display:inline-block;}' +
+          '@keyframes agy-pop{0%{opacity:0.95;transform:scale(0.3);}100%{opacity:0;transform:scale(1.75);}}' +
         '</style>' +
         '<div class="agy-c">' +
-          '<div class="agy-ring"></div>' +
-          '<svg class="agy-arrow" width="24" height="24" viewBox="0 0 24 24" fill="none">' +
-            '<path d="M3.5 2.5L10.5 20.5L13.5 13L21 10L3.5 2.5Z" fill="#ffffff" stroke="#0f172a" stroke-width="1.8" stroke-linejoin="round"/>' +
-          '</svg>' +
+          '<div class="agy-ptr">' +
+            '<div class="agy-ring"></div>' +
+            '<svg class="agy-arrow" width="24" height="24" viewBox="0 0 24 24" fill="none">' +
+              '<path d="M3.5 2.5L10.5 20.5L13.5 13L21 10L3.5 2.5Z" fill="#ffffff" stroke="#0f172a" stroke-width="1.9" stroke-linejoin="round"/>' +
+            '</svg>' +
+          '</div>' +
+          '<div class="agy-pill"></div>' +
         '</div>';
-        (document.documentElement || document.body).appendChild(host);
+        mount.appendChild(host);
         st.host = host;
         st.cursorEl = shadow.querySelector('.agy-c');
         st.rippleEl = shadow.querySelector('.agy-ring');
+        st.pillEl = shadow.querySelector('.agy-pill');
       }
       return Boolean(st.cursorEl);
     }
-    globalThis.__agyApplyCursor = function(x, y, phase, visible, autoFadeMs) {
-      if (!ensureDom()) return false;
+    globalThis.__agyApplyCursor = function(x, y, phase, visible, autoFadeMs, labelText) {
       if (st.hideTimer) { clearTimeout(st.hideTimer); st.hideTimer = null; }
-      if (typeof x === 'number' && Number.isFinite(x)) st.x = Math.round(x);
-      if (typeof y === 'number' && Number.isFinite(y)) st.y = Math.round(y);
+      if (typeof x === 'number' && Number.isFinite(x) && x >= 0) st.x = Math.round(x);
+      if (typeof y === 'number' && Number.isFinite(y) && y >= 0) st.y = Math.round(y);
       st.phase = phase || 'move';
       st.visible = Boolean(visible);
+      if (typeof labelText === 'string') st.label = labelText.slice(0, 60);
+      if (!ensureDom()) return false;
       const el = st.cursorEl;
       if (!el) return false;
-      el.style.transform = 'translate3d(' + st.x + 'px,' + st.y + 'px,0)';
-      el.classList.toggle('vis', st.visible);
+      if (st.x >= 0 && st.y >= 0) {
+        el.style.transform = 'translate3d(' + st.x + 'px,' + st.y + 'px,0)';
+      }
+      el.classList.toggle('vis', st.visible && st.x >= 0 && st.y >= 0);
       el.classList.toggle('down', st.phase === 'down');
+      if (st.pillEl) {
+        const cleanLabel = (st.label || '').trim();
+        st.pillEl.textContent = cleanLabel;
+        st.pillEl.classList.toggle('show', Boolean(cleanLabel) && st.visible);
+      }
       if (st.phase === 'down' && st.rippleEl) {
         st.rippleEl.classList.remove('pop');
         void st.rippleEl.offsetWidth;
@@ -428,14 +444,22 @@ const AI_CURSOR_BOOTSTRAP_FN = `(function() {
       }
       if (st.visible && autoFadeMs > 0) {
         st.hideTimer = setTimeout(function() {
-          if (st.phase !== 'down') {
-            el.classList.remove('vis');
-          }
+          st.visible = false;
+          if (st.cursorEl) st.cursorEl.classList.remove('vis');
         }, autoFadeMs);
       }
       return true;
     };
-    ensureDom();
+    if (document && document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function() {
+        ensureDom();
+        if (st.visible && st.x >= 0 && st.y >= 0) {
+          globalThis.__agyApplyCursor(st.x, st.y, st.phase, true, 0, st.label);
+        }
+      }, { once: true });
+    } else {
+      ensureDom();
+    }
   } catch {}
 })();`;
 
@@ -461,7 +485,9 @@ class EdgeTabSession {
 
     // Navigation & frame metadata
     this.mainFrameId = '';
-    this.url = (initialUrl && initialUrl !== 'about:blank') ? initialUrl : '';
+    this.intendedUrl = (initialUrl && initialUrl !== 'about:blank') ? initialUrl : '';
+    this.committedUrl = '';
+    this.url = this.intendedUrl;
     this.title = '';
     this.isLoading = false;
     this.canGoBack = false;
@@ -476,14 +502,29 @@ class EdgeTabSession {
     this.pendingWorlds = new Map();
     this.cursorScriptId = null;
 
-    // Agent control, focus emulation & ordered input queue
+    // Agent control, focus emulation, ordered input queue & screenshot cache
     this.agentControlling = false;
     this.focusEmulated = false;
     this.inputQueue = Promise.resolve();
     this.layoutCache = { width: 1280, height: 800, updatedAt: 0 };
+    this._previewCache = { dataUrl: '', updatedAt: 0 };
+    this._previewPromise = null;
 
-    // Cursor state
-    this.cursor = { active: false, x: -100, y: -100, phase: 'idle', lastClickSeq: 0 };
+    // Cursor state (independent of OS cursor; normalized unit coords decoded via viewport bounds)
+    this.cursorNormalizedMode = false;
+    this._cursorRenderInFlight = false;
+    this._pendingCursorRender = null;
+    this.cursor = {
+      active: false,
+      x: -100,
+      y: -100,
+      xRatio: -1,
+      yRatio: -1,
+      phase: 'idle',
+      label: '',
+      lastClickSeq: 0,
+      fadeMs: 0,
+    };
 
     // Network capture
     this.networkEntries = [];
@@ -560,9 +601,13 @@ class EdgeTabSession {
     }
   }
 
-  async ensureAttached() {
+  async ensureAttached(opts = {}) {
+    const autoNavigateIntended = opts.autoNavigateIntended !== false;
     if (this.closing) throw new Error(`Tab ${this.tabKey} is closing`);
     if (this.ws && this.ws.readyState === 1 && this.targetId) {
+      if (autoNavigateIntended && !this.committedUrl && this.intendedUrl) {
+        void this.navigate(this.intendedUrl, { skipAttach: true }).catch(() => undefined);
+      }
       return this;
     }
     if (this.attachPromise) {
@@ -576,7 +621,7 @@ class EdgeTabSession {
       const claimed = this.engine.getClaimedTargetIds();
       let target = null;
 
-      // Reuse Edge's initial idle tab for the first Antigravity tab instead of leaving an extra empty tab
+      // Claim Edge's initial New Tab or an idle blank tab before ever opening a second tab
       const pages = await edgeLauncher.getEdgePageTargets(port);
       if (this.targetId) {
         target = pages.find((p) => p.id === this.targetId) || null;
@@ -584,9 +629,10 @@ class EdgeTabSession {
       if (!target) {
         target = pages.find((p) => {
           if (!p?.id || !p.webSocketDebuggerUrl || claimed.has(p.id)) return false;
-          if (/^(edge|chrome|devtools):\/\//i.test(p.url || '')) return false;
-          // Only claim unclaimed blank / new-tab / initial Edge page when no target assigned yet
-          return claimed.size === 0 || p.url === 'about:blank' || p.url === '' || /^edge:\/\/newtab/i.test(p.url || '');
+          const u = (p.url || '').trim();
+          const isBlankOrNewTab = u === '' || u === 'about:blank' || /^edge:\/\/newtab/i.test(u);
+          if (/^(edge|chrome|devtools):\/\//i.test(u) && !isBlankOrNewTab) return false;
+          return claimed.size === 0 || isBlankOrNewTab;
         }) || null;
       }
 
@@ -623,8 +669,10 @@ class EdgeTabSession {
       if (frameTreeRes?.frameTree?.frame) {
         const f = frameTreeRes.frameTree.frame;
         this.mainFrameId = f.id || '';
-        if (f.url && f.url !== 'about:blank') {
-          this.url = f.url;
+        const fUrl = (f.url || '').trim();
+        if (fUrl && fUrl !== 'about:blank' && !/^edge:\/\/newtab/i.test(fUrl)) {
+          this.committedUrl = fUrl;
+          this.url = fUrl;
         }
       }
 
@@ -639,6 +687,10 @@ class EdgeTabSession {
       if (this.agentControlling) {
         await this.sendCdp('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => undefined);
         this.focusEmulated = true;
+      }
+
+      if (autoNavigateIntended && !this.committedUrl && this.intendedUrl) {
+        void this.navigate(this.intendedUrl, { skipAttach: true }).catch(() => undefined);
       }
 
       return this;
@@ -809,12 +861,15 @@ class EdgeTabSession {
         if (!frame.parentId) {
           this.mainFrameId = frame.id;
           this.layoutCache.updatedAt = 0;
-          if (frame.url) {
-            this.url = frame.url;
+          this._previewCache.updatedAt = 0;
+          const fUrl = (frame.url || '').trim();
+          if (fUrl && fUrl !== 'about:blank' && !/^edge:\/\/newtab/i.test(fUrl)) {
+            this.committedUrl = fUrl;
+            this.url = fUrl;
           }
           this.loadError = null;
           this._updateRegistryMetadata();
-          this._emitGuestEvent('did-navigate', { url: this.url });
+          this._emitGuestEvent('did-navigate', { url: this.url || fUrl });
           void this._refreshHistoryAndTitle().catch(() => undefined);
           void this._ensureCursorBootstrapped().catch(() => undefined);
         }
@@ -824,7 +879,11 @@ class EdgeTabSession {
 
     if (method === 'Page.navigatedWithinDocument') {
       if (!params.frameId || params.frameId === this.mainFrameId) {
-        if (params.url) this.url = params.url;
+        if (params.url) {
+          this.committedUrl = params.url;
+          this.url = params.url;
+        }
+        this._previewCache.updatedAt = 0;
         this._updateRegistryMetadata();
         this._emitGuestEvent('did-navigate-in-page', { url: this.url });
         void this._refreshHistoryAndTitle().catch(() => undefined);
@@ -844,6 +903,7 @@ class EdgeTabSession {
       }
       this.isLoading = false;
       this.layoutCache.updatedAt = 0;
+      this._previewCache.updatedAt = 0;
       void this._refreshHistoryAndTitle().then(() => {
         this._updateRegistryMetadata();
         this._emitGuestEvent('did-stop-loading');
@@ -883,7 +943,10 @@ class EdgeTabSession {
       const cur = hist.entries[idx];
       this.canGoBack = idx > 0;
       this.canGoForward = idx >= 0 && idx < hist.entries.length - 1;
-      if (cur?.url && cur.url !== 'about:blank') this.url = cur.url;
+      if (cur?.url && cur.url !== 'about:blank' && !/^edge:\/\/newtab/i.test(cur.url)) {
+        this.committedUrl = cur.url;
+        this.url = cur.url;
+      }
       if (cur?.title) this.title = cur.title;
     }
     if (typeof titleEval?.result?.value === 'string' && titleEval.result.value) {
@@ -963,10 +1026,10 @@ class EdgeTabSession {
         returnByValue: true,
         userGesture: false,
       }, sid);
-      if (this.cursor.active || this.agentControlling) {
-        const fade = this.agentControlling ? 0 : CURSOR_IDLE_FADE_MS;
+      if (this.cursor.active || (this.agentControlling && this.cursor.x >= 0)) {
+        const fade = this.agentControlling ? 0 : (this.cursor.fadeMs || CURSOR_IDLE_FADE_MS);
         await this.sendCdp('Runtime.evaluate', {
-          expression: `globalThis.__agyApplyCursor && globalThis.__agyApplyCursor(${this.cursor.x}, ${this.cursor.y}, ${JSON.stringify(this.cursor.phase)}, ${Boolean(this.cursor.active || this.agentControlling)}, ${fade})`,
+          expression: `globalThis.__agyApplyCursor && globalThis.__agyApplyCursor(${this.cursor.x}, ${this.cursor.y}, ${JSON.stringify(this.cursor.phase)}, ${Boolean(this.cursor.active)}, ${fade}, ${JSON.stringify(this.cursor.label || '')})`,
           contextId: ctxId,
           returnByValue: true,
           userGesture: false,
@@ -975,14 +1038,33 @@ class EdgeTabSession {
     });
   }
 
-  async _renderCursorOverlay(x, y, phase, visible) {
+  _enqueueCursorRender(snapshot) {
+    this._pendingCursorRender = snapshot;
+    if (this._cursorRenderInFlight) return Promise.resolve();
+    this._cursorRenderInFlight = true;
+    return (async () => {
+      try {
+        while (this._pendingCursorRender) {
+          const next = this._pendingCursorRender;
+          this._pendingCursorRender = null;
+          await this._renderCursorOverlay(next.x, next.y, next.phase, next.visible, next.fadeMs, next.label);
+        }
+      } finally {
+        this._cursorRenderInFlight = false;
+      }
+    })();
+  }
+
+  async _renderCursorOverlay(x, y, phase, visible, fadeMs = 0, label = '') {
     try {
       if (!this.ws || this.ws.readyState !== 1) return;
       if (!this.mainFrameId) await this._waitForFrameTree();
       if (!this.mainFrameId) return;
-      const fade = (visible && !this.agentControlling) ? CURSOR_IDLE_FADE_MS : 0;
+      const effectiveFade = typeof fadeMs === 'number' && fadeMs > 0
+        ? fadeMs
+        : (visible && !this.agentControlling ? CURSOR_IDLE_FADE_MS : 0);
       await this._withWorld(async () => '', this.mainFrameId, CURSOR_WORLD_NAME, true, async (sid, ctxId) => {
-        const expr = `if (typeof globalThis.__agyApplyCursor !== 'function') { ${AI_CURSOR_BOOTSTRAP_FN} } globalThis.__agyApplyCursor && globalThis.__agyApplyCursor(${clampCoord(x)}, ${clampCoord(y)}, ${JSON.stringify(phase)}, ${Boolean(visible)}, ${fade});`;
+        const expr = `if (typeof globalThis.__agyApplyCursor !== 'function') { ${AI_CURSOR_BOOTSTRAP_FN} } globalThis.__agyApplyCursor && globalThis.__agyApplyCursor(${clampCoord(x)}, ${clampCoord(y)}, ${JSON.stringify(phase)}, ${Boolean(visible)}, ${effectiveFade}, ${JSON.stringify(label || '')});`;
         await this.sendCdp('Runtime.evaluate', {
           expression: expr,
           contextId: ctxId,
@@ -997,33 +1079,106 @@ class EdgeTabSession {
     if (!state || !state.active) {
       this.cursor.active = false;
       this.cursor.phase = 'idle';
-      void this._renderCursorOverlay(this.cursor.x, this.cursor.y, 'idle', false);
+      this.cursor.label = '';
+      void this._enqueueCursorRender({
+        x: this.cursor.x,
+        y: this.cursor.y,
+        phase: 'idle',
+        visible: false,
+        fadeMs: 0,
+        label: '',
+      });
       return;
     }
-    this.cursor.active = true;
-    this.cursor.x = clampCoord(state.x);
-    this.cursor.y = clampCoord(state.y);
+
+    const rawX = Number(state.x);
+    const rawY = Number(state.y);
+    if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return;
+
+    const isFractionalUnit = (rawX >= 0 && rawX <= 1 && rawY >= 0 && rawY <= 1) &&
+      (rawX % 1 !== 0 || rawY % 1 !== 0);
+    if (isFractionalUnit) {
+      this.cursorNormalizedMode = true;
+    }
+    const useNormalized = isFractionalUnit ||
+      (this.cursorNormalizedMode && rawX >= 0 && rawX <= 1 && rawY >= 0 && rawY <= 1);
+
     const seq = typeof state.clickSeq === 'number' ? state.clickSeq : 0;
-    const isClick = seq > this.cursor.lastClickSeq || state.phase === 'click' || state.phase === 'down';
+    const isClick = seq > this.cursor.lastClickSeq || state.phase === 'click' || state.phase === 'down' || state.phase === 'clicking';
     this.cursor.lastClickSeq = Math.max(this.cursor.lastClickSeq, seq);
     this.cursor.phase = isClick ? 'down' : 'move';
-    void this._renderCursorOverlay(this.cursor.x, this.cursor.y, this.cursor.phase, true);
+    this.cursor.active = true;
+
+    const defaultPhaseLabels = {
+      browsing: 'Browsing',
+      clicking: 'Clicking',
+      scrolling: 'Scrolling',
+      typing: 'Typing',
+      thinking: 'Thinking...',
+      loading: 'Loading...',
+    };
+    const labelText = typeof state.label === 'string' && state.label.trim()
+      ? state.label.trim()
+      : (defaultPhaseLabels[state.phase] || '');
+    this.cursor.label = labelText;
+    this.cursor.fadeMs = this.agentControlling ? 0 : CURSOR_IDLE_FADE_MS;
+
+    const resolveAndRender = async () => {
+      const vp = (this.ws && this.ws.readyState === 1)
+        ? await this._getViewportBounds()
+        : this.layoutCache;
+      const px = useNormalized ? Math.round(rawX * vp.width) : Math.round(rawX);
+      const py = useNormalized ? Math.round(rawY * vp.height) : Math.round(rawY);
+      this.cursor.x = Math.max(0, Math.min(px, Math.max(0, vp.width - 1)));
+      this.cursor.y = Math.max(0, Math.min(py, Math.max(0, vp.height - 1)));
+      this.cursor.xRatio = vp.width > 0 ? this.cursor.x / vp.width : 0;
+      this.cursor.yRatio = vp.height > 0 ? this.cursor.y / vp.height : 0;
+      return this._enqueueCursorRender({
+        x: this.cursor.x,
+        y: this.cursor.y,
+        phase: this.cursor.phase,
+        visible: true,
+        fadeMs: this.cursor.fadeMs,
+        label: this.cursor.label,
+      });
+    };
+    void resolveAndRender();
   }
 
   async setAgentControlling(active) {
     this.agentControlling = Boolean(active);
     if (this.agentControlling) {
-      await this.ensureAttached();
+      await this.ensureAttached({ autoNavigateIntended: false });
       await this.sendCdp('Target.activateTarget', { targetId: this.targetId }).catch(() => undefined);
       await this.sendCdp('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => undefined);
       this.focusEmulated = true;
-      this.cursor.active = true;
-      void this._renderCursorOverlay(this.cursor.x, this.cursor.y, 'move', true);
+      if (this.cursor.x >= 0 && this.cursor.y >= 0) {
+        this.cursor.active = true;
+        this.cursor.fadeMs = 0;
+        void this._enqueueCursorRender({
+          x: this.cursor.x,
+          y: this.cursor.y,
+          phase: 'move',
+          visible: true,
+          fadeMs: 0,
+          label: this.cursor.label || 'Agent active',
+        });
+      }
     } else if (this.ws && this.ws.readyState === 1) {
       await this.sendCdp('Emulation.setFocusEmulationEnabled', { enabled: false }).catch(() => undefined);
       this.focusEmulated = false;
-      this.cursor.active = false;
-      void this._renderCursorOverlay(this.cursor.x, this.cursor.y, 'idle', false);
+      // Hold final cursor position cleanly for 1.8s so fast clicks remain visible to the user
+      if (this.cursor.active && this.cursor.x >= 0 && this.cursor.y >= 0) {
+        this.cursor.fadeMs = CURSOR_IDLE_FADE_MS;
+        void this._enqueueCursorRender({
+          x: this.cursor.x,
+          y: this.cursor.y,
+          phase: 'idle',
+          visible: true,
+          fadeMs: CURSOR_IDLE_FADE_MS,
+          label: '',
+        });
+      }
     }
   }
 
@@ -1034,7 +1189,7 @@ class EdgeTabSession {
     }
   }
 
-  async navigate(url) {
+  async navigate(url, opts = {}) {
     if (typeof webviewBrowser?.validateWebviewNavigationUrl === 'function') {
       const check = webviewBrowser.validateWebviewNavigationUrl(url, 'http://127.0.0.1');
       if (!check.allowed) return false;
@@ -1042,11 +1197,21 @@ class EdgeTabSession {
       return false;
     }
 
-    await this.ensureAttached();
-    await this.activateInEdge();
+    if (url && url !== 'about:blank') {
+      this.intendedUrl = url;
+      this.url = url;
+    }
+
+    if (!opts.skipAttach) {
+      await this.ensureAttached({ autoNavigateIntended: false });
+      await this.activateInEdge();
+    } else if (this.targetId) {
+      await this.sendCdp('Target.activateTarget', { targetId: this.targetId }).catch(() => undefined);
+    }
 
     this.loadError = null;
     this.isLoading = true;
+    this._previewCache.updatedAt = 0;
     this._emitGuestEvent('did-start-loading');
 
     const settlePromise = new Promise((resolve, reject) => {
@@ -1439,7 +1604,7 @@ class EdgeTabSession {
 
   async dispatchAgentMouse(params) {
     return this._enqueueInput(async () => {
-      await this.ensureAttached();
+      await this.ensureAttached({ autoNavigateIntended: false });
       if (!this.focusEmulated && this.agentControlling) {
         await this.sendCdp('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => undefined);
         this.focusEmulated = true;
@@ -1454,10 +1619,25 @@ class EdgeTabSession {
       const type = params?.type || 'mouseMoved';
       this.cursor.x = x;
       this.cursor.y = y;
+      this.cursor.xRatio = vp.width > 0 ? x / vp.width : 0;
+      this.cursor.yRatio = vp.height > 0 ? y / vp.height : 0;
       this.cursor.active = true;
       this.cursor.phase = type === 'mousePressed' ? 'down' : type === 'mouseReleased' ? 'up' : 'move';
+      this.cursor.fadeMs = this.agentControlling ? 0 : CURSOR_IDLE_FADE_MS;
+      const actionLabel = type === 'mouseWheel'
+        ? 'Scrolling'
+        : type === 'mousePressed'
+          ? 'Clicking'
+          : (this.cursor.label || 'Browsing');
 
-      await this._renderCursorOverlay(x, y, this.cursor.phase, true);
+      await this._enqueueCursorRender({
+        x,
+        y,
+        phase: this.cursor.phase,
+        visible: true,
+        fadeMs: this.cursor.fadeMs,
+        label: actionLabel,
+      });
       await this.sendCdp('Input.dispatchMouseEvent', {
         button: 'none',
         clickCount: 0,
@@ -1465,6 +1645,9 @@ class EdgeTabSession {
         x,
         y,
       });
+      if (type === 'mouseReleased' || type === 'mouseWheel') {
+        this._previewCache.updatedAt = 0;
+      }
     });
   }
 
@@ -1812,6 +1995,68 @@ class EdgeTabSession {
       this.targetId = null;
     }
   }
+
+  async getPreviewDataUrl() {
+    if (!this.ws || this.ws.readyState !== 1) return '';
+    const now = Date.now();
+    if (this._previewCache.dataUrl && now - this._previewCache.updatedAt < 750) {
+      return this._previewCache.dataUrl;
+    }
+    if (this._previewPromise) return this._previewPromise;
+    this._previewPromise = (async () => {
+      try {
+        const res = await this.sendCdp('Page.captureScreenshot', {
+          format: 'jpeg',
+          quality: 74,
+          fromSurface: true,
+        }, '', 5000);
+        if (res?.data) {
+          const dataUrl = `data:image/jpeg;base64,${res.data}`;
+          this._previewCache = { dataUrl, updatedAt: Date.now() };
+          return dataUrl;
+        }
+      } catch {}
+      return this._previewCache.dataUrl || '';
+    })().finally(() => {
+      this._previewPromise = null;
+    });
+    return this._previewPromise;
+  }
+
+  async getCompanionSnapshot(includeScreenshot = false) {
+    const attached = Boolean(this.ws && this.ws.readyState === 1);
+    let screenshotDataUrl = '';
+    if (attached && includeScreenshot) {
+      screenshotDataUrl = await this.getPreviewDataUrl();
+    }
+    return {
+      tabKey: this.tabKey,
+      attached,
+      url: this.url || this.intendedUrl || 'about:blank',
+      title: this.title || (attached ? 'Microsoft Edge' : 'Standby in Microsoft Edge'),
+      isLoading: attached ? Boolean(this.isLoading) : false,
+      agentControlling: Boolean(this.agentControlling),
+      cursor: {
+        active: Boolean(this.cursor.active),
+        xRatio: this.cursor.xRatio,
+        yRatio: this.cursor.yRatio,
+        phase: this.cursor.phase,
+        label: this.cursor.label || '',
+      },
+      screenshotDataUrl,
+      updatedAt: Date.now(),
+    };
+  }
+
+  async focusInEdge() {
+    await this.ensureAttached({ autoNavigateIntended: true });
+    if (this.targetId) {
+      await this.sendCdp('Target.activateTarget', { targetId: this.targetId }).catch(() => undefined);
+    }
+    await this.sendCdp('Page.bringToFront').catch(() => undefined);
+    edgeLauncher.focusEdgeOSWindow?.();
+    return true;
+  }
 }
 
 class EdgeVirtualEngine {
@@ -1842,8 +2087,9 @@ class EdgeVirtualEngine {
       prev.wc = wc;
       prev.wcId = wc?.id;
       prev.hubSender = hubSender;
-      if (initialUrl && initialUrl !== 'about:blank' && !prev.url) {
-        prev.url = initialUrl;
+      if (initialUrl && initialUrl !== 'about:blank') {
+        if (!prev.committedUrl) prev.intendedUrl = initialUrl;
+        if (!prev.url) prev.url = initialUrl;
       }
       if (prev.wcId !== undefined) this.sessionsByWcId.set(prev.wcId, prev);
       return prev;
@@ -1874,6 +2120,18 @@ class EdgeVirtualEngine {
     return this.sessionsByWcId.has(wcId);
   }
 
+  isTabAttached(tabKey) {
+    const s = this.sessionsByTabKey.get(tabKey);
+    return Boolean(s && s.ws && s.ws.readyState === 1);
+  }
+
+  hasAnyAttachedTab() {
+    for (const s of this.sessionsByTabKey.values()) {
+      if (s.ws && s.ws.readyState === 1) return true;
+    }
+    return false;
+  }
+
   getSession(tabKey) {
     return this.sessionsByTabKey.get(tabKey) || null;
   }
@@ -1887,7 +2145,7 @@ class EdgeVirtualEngine {
     if (!s) return null;
     if (!s.ws && !s.url) return null;
     return {
-      url: s.url || 'about:blank',
+      url: s.url || s.intendedUrl || 'about:blank',
       title: s.title || '',
       canGoBack: s.canGoBack,
       canGoForward: s.canGoForward,
@@ -1901,12 +2159,48 @@ class EdgeVirtualEngine {
     await s.setAgentControlling(active);
   }
 
-  async activateTab(tabKey) {
+  /** Switches active tab in Edge ONLY if Edge is already attached (never launches Edge on standby restore). */
+  async activateIfAttached(tabKey) {
     const s = this.sessionsByTabKey.get(tabKey);
-    if (!s) return;
-    if (s.ws || (s.url && s.url !== 'about:blank')) {
-      await s.activateInEdge().catch(() => undefined);
+    if (!s || !s.ws || s.ws.readyState !== 1) return;
+    await s.activateInEdge().catch(() => undefined);
+  }
+
+  /** Used strictly for newly opened interactive user tabs (e.g. '+ > Browser' -> google.com). */
+  async acquireInteractiveUrl(tabKey, url) {
+    const s = this.sessionsByTabKey.get(tabKey);
+    if (!s || !url || url === 'about:blank') return false;
+    return s.navigate(url);
+  }
+
+  async focusEdgeWindow(tabKey) {
+    const s = tabKey
+      ? this.sessionsByTabKey.get(tabKey)
+      : Array.from(this.sessionsByTabKey.values())[0];
+    if (!s) {
+      await edgeLauncher.ensureEdgeRunning();
+      edgeLauncher.focusEdgeOSWindow?.();
+      return true;
     }
+    return s.focusInEdge();
+  }
+
+  async getCompanionState(tabKey, includeScreenshot = false) {
+    const s = tabKey ? this.sessionsByTabKey.get(tabKey) : null;
+    if (!s) {
+      return {
+        tabKey: tabKey || '',
+        attached: false,
+        url: '',
+        title: '',
+        isLoading: false,
+        agentControlling: false,
+        cursor: null,
+        screenshotDataUrl: '',
+        updatedAt: Date.now(),
+      };
+    }
+    return s.getCompanionSnapshot(Boolean(includeScreenshot));
   }
 
   async navigateTab(tabKey, url) {

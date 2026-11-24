@@ -1,58 +1,38 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.ensureEdgeRunning = ensureEdgeRunning;
-exports.isEdgeRunning = isEdgeRunning;
-exports.getEdgePageTargets = getEdgePageTargets;
-exports.findEdgeExecutable = findEdgeExecutable;
-exports.syncDevToolsActivePort = syncDevToolsActivePort;
-exports.setupEdgeAutoLauncher = setupEdgeAutoLauncher;
-exports.PROFILE_DIR = exports.CHROME_USER_DATA_DIR = exports.DEFAULT_PORT = void 0;
+// edgeLauncher.cjs.js - Lightweight on-demand Microsoft Edge launcher (Browser-Agent profile)
+'use strict';
 
-const child_process = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const http = require("http");
-const os = require("os");
+const child_process = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const os = require('os');
 
 const DEFAULT_PORT = 9222;
-exports.DEFAULT_PORT = DEFAULT_PORT;
+const PROFILE_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'edge_profile');
 
 const EDGE_PATHS = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+  path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
 ];
 
+/** Locates installed Microsoft Edge executable on Windows. */
 function findEdgeExecutable() {
   for (const p of EDGE_PATHS) {
-    if (fs.existsSync(p)) {
-      return p;
-    }
+    if (p && fs.existsSync(p)) return p;
   }
   return null;
 }
 
-const PROFILE_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'edge_profile');
-exports.PROFILE_DIR = PROFILE_DIR;
-
-const CHROME_USER_DATA_DIR = path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'User Data');
-exports.CHROME_USER_DATA_DIR = CHROME_USER_DATA_DIR;
-
-const ANTIGRAVITY_USER_DATA_DIR = path.join(process.env.APPDATA || '', 'Antigravity');
-exports.ANTIGRAVITY_USER_DATA_DIR = ANTIGRAVITY_USER_DATA_DIR;
-
+/** Queries Edge DevTools `/json/version`; resolves metadata object or `null`. */
 function isEdgeRunning(port = DEFAULT_PORT) {
   return new Promise((resolve) => {
     const req = http.get(`http://127.0.0.1:${port}/json/version`, (res) => {
       let data = '';
-      res.on('data', chunk => data += chunk);
+      res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
-          if (res.statusCode === 200) {
-            resolve(JSON.parse(data));
-          } else {
-            resolve(null);
-          }
+          resolve(res.statusCode === 200 ? JSON.parse(data) : null);
         } catch {
           resolve(null);
         }
@@ -66,17 +46,17 @@ function isEdgeRunning(port = DEFAULT_PORT) {
   });
 }
 
+/** Lists active `page` CDP targets on Edge port. */
 function getEdgePageTargets(port = DEFAULT_PORT) {
   return new Promise((resolve) => {
     const req = http.get(`http://127.0.0.1:${port}/json/list`, (res) => {
       let data = '';
-      res.on('data', chunk => data += chunk);
+      res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
           if (res.statusCode === 200) {
             const list = JSON.parse(data);
-            const pages = Array.isArray(list) ? list.filter(t => t.type === 'page') : [];
-            resolve(pages);
+            resolve(Array.isArray(list) ? list.filter((t) => t && t.type === 'page') : []);
           } else {
             resolve([]);
           }
@@ -93,40 +73,16 @@ function getEdgePageTargets(port = DEFAULT_PORT) {
   });
 }
 
-function syncDevToolsActivePort(port, wsUrl) {
-  try {
-    const pathname = new URL(wsUrl).pathname;
-    const content = `${port}\n${pathname}\n`;
-
-    try {
-      if (!fs.existsSync(CHROME_USER_DATA_DIR)) fs.mkdirSync(CHROME_USER_DATA_DIR, { recursive: true });
-      fs.writeFileSync(path.join(CHROME_USER_DATA_DIR, 'DevToolsActivePort'), content, 'utf8');
-    } catch {}
-
-    try {
-      if (!fs.existsSync(PROFILE_DIR)) fs.mkdirSync(PROFILE_DIR, { recursive: true });
-      fs.writeFileSync(path.join(PROFILE_DIR, 'DevToolsActivePort'), content, 'utf8');
-    } catch {}
-
-    try {
-      if (!fs.existsSync(ANTIGRAVITY_USER_DATA_DIR)) fs.mkdirSync(ANTIGRAVITY_USER_DATA_DIR, { recursive: true });
-      fs.writeFileSync(path.join(ANTIGRAVITY_USER_DATA_DIR, 'DevToolsActivePort'), content, 'utf8');
-    } catch {}
-
-    return true;
-  } catch (err) {
-    console.error('[EdgeLauncher] Error syncing DevToolsActivePort:', err);
-    return false;
-  }
-}
-
 let _edgeProcess = null;
 let _launchPromise = null;
 
+/**
+ * Ensures dedicated Microsoft Edge (`Browser-Agent` profile) is running on `port`.
+ * Coalesces concurrent calls atomically so only one Edge window launches.
+ */
 async function ensureEdgeRunning(port = DEFAULT_PORT) {
-  const existingVersion = await isEdgeRunning(port);
-  if (existingVersion && existingVersion.webSocketDebuggerUrl) {
-    syncDevToolsActivePort(port, existingVersion.webSocketDebuggerUrl);
+  const existing = await isEdgeRunning(port);
+  if (existing && existing.webSocketDebuggerUrl) {
     return true;
   }
 
@@ -138,7 +94,6 @@ async function ensureEdgeRunning(port = DEFAULT_PORT) {
     try {
       const checkAgain = await isEdgeRunning(port);
       if (checkAgain && checkAgain.webSocketDebuggerUrl) {
-        syncDevToolsActivePort(port, checkAgain.webSocketDebuggerUrl);
         return true;
       }
 
@@ -149,10 +104,6 @@ async function ensureEdgeRunning(port = DEFAULT_PORT) {
 
       try {
         if (!fs.existsSync(PROFILE_DIR)) fs.mkdirSync(PROFILE_DIR, { recursive: true });
-      } catch {}
-
-      try {
-        if (!fs.existsSync(CHROME_USER_DATA_DIR)) fs.mkdirSync(CHROME_USER_DATA_DIR, { recursive: true });
       } catch {}
 
       const args = [
@@ -171,42 +122,36 @@ async function ensureEdgeRunning(port = DEFAULT_PORT) {
         '--disable-component-update',
         '--disable-domain-reliability',
         '--metrics-recording-only',
-        '--no-report-upload'
+        '--no-report-upload',
       ];
 
       _edgeProcess = child_process.spawn(edgeExe, args, {
         detached: true,
-        stdio: 'ignore'
+        stdio: 'ignore',
       });
       _edgeProcess.unref();
-
       _edgeProcess.on('exit', () => {
         _edgeProcess = null;
       });
 
-      const startTime = Date.now();
-      while (Date.now() - startTime < 8000) {
-        await new Promise(r => setTimeout(r, 100));
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 80));
         const version = await isEdgeRunning(port);
         if (version && version.webSocketDebuggerUrl) {
-          syncDevToolsActivePort(port, version.webSocketDebuggerUrl);
-
-          // Page Readiness Barrier: wait a moment for Edge's initial tab to transition beyond empty/about:blank
-          const pageDeadline = Date.now() + 1000;
-          while (Date.now() < pageDeadline) {
+          const targetDeadline = Date.now() + 1200;
+          while (Date.now() < targetDeadline) {
             const pages = await getEdgePageTargets(port);
-            if (pages.length > 0 && pages.some(p => p.url && p.url !== 'about:blank')) {
+            if (pages.length > 0 && pages[0].webSocketDebuggerUrl) {
               break;
             }
-            await new Promise(r => setTimeout(r, 25));
+            await new Promise((r) => setTimeout(r, 30));
           }
-
-          console.error(`[EdgeLauncher] Microsoft Edge launched with remote debugging on port ${port}`);
           return true;
         }
       }
 
-      throw new Error(`Timeout waiting for Microsoft Edge on port ${port}`);
+      throw new Error(`Timeout waiting for Microsoft Edge CDP on port ${port}`);
     } finally {
       _launchPromise = null;
     }
@@ -215,25 +160,39 @@ async function ensureEdgeRunning(port = DEFAULT_PORT) {
   return _launchPromise;
 }
 
-function setupEdgeAutoLauncher(session) {
-  if (!session || !session.defaultSession) return;
-  session.defaultSession.webRequest.onBeforeRequest(
-    {
-      urls: ['<all_urls>']
-    },
-    (details, callback) => {
-      if (details.url && details.url.includes('CheckDevToolsActivePort')) {
-        ensureEdgeRunning()
-          .catch((err) => {
-            console.error('[EdgeLauncher] Error ensuring Edge running:', err);
-          })
-          .finally(() => {
-            callback({});
-          });
-        return;
+/** Restores and brings the Agent Edge OS window (`edge_profile`) to the foreground on Windows. */
+function focusEdgeOSWindow() {
+  if (process.platform !== 'win32') return;
+  const psScript = `
+    $ErrorActionPreference = 'SilentlyContinue'
+    $sig = '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd); [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);'
+    $win32 = Add-Type -MemberDefinition $sig -Name 'EdgeFocusWin32' -Namespace 'AgyEdge' -PassThru
+    $procs = Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object { $_.CommandLine -like '*edge_profile*' }
+    foreach ($cp in $procs) {
+      $p = Get-Process -Id $cp.ProcessId -ErrorAction SilentlyContinue
+      if ($p -and $p.MainWindowHandle -ne [IntPtr]::Zero) {
+        if ($win32::IsIconic($p.MainWindowHandle)) { [void]$win32::ShowWindowAsync($p.MainWindowHandle, 9) }
+        [void]$win32::SetForegroundWindow($p.MainWindowHandle)
+        break
       }
-      callback({});
     }
-  );
-  console.error('[EdgeLauncher] Edge auto-launcher registered for /browser command');
+  `;
+  try {
+    const child = child_process.spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psScript], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+  } catch {}
 }
+
+module.exports = {
+  DEFAULT_PORT,
+  PROFILE_DIR,
+  findEdgeExecutable,
+  isEdgeRunning,
+  getEdgePageTargets,
+  ensureEdgeRunning,
+  focusEdgeOSWindow,
+};

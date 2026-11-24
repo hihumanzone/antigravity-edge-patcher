@@ -4,6 +4,10 @@ const os = require('os');
 const vm = require('vm');
 const child_process = require('child_process');
 
+/**
+ * Resolves Antigravity installation paths, app.asar, Edge profile directory,
+ * and legacy chrome-devtools-mcp artifact locations (for cleanup/uninstall).
+ */
 function getAntigravityPaths() {
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
   const baseDir = path.join(localAppData, 'Programs', 'antigravity');
@@ -11,45 +15,10 @@ function getAntigravityPaths() {
   const appAsar = path.join(resourcesDir, 'app.asar');
   const appAsarBackup = path.join(resourcesDir, 'app.asar.backup');
   const unpackedDir = path.join(resourcesDir, 'app.asar.unpacked');
+
   const cdtMcpDir = path.join(unpackedDir, 'node_modules', 'chrome-devtools-mcp');
-  const cdtMcpPkgJson = path.join(cdtMcpDir, 'package.json');
-
-  // Detect dynamic source and entry directories across versions:
-  // - v1.9 - v1.12 used build/src
-  // - v1.13+ GN/Ninja build uses out/Default/gen/src
-  let cdtMcpSrc = path.join(cdtMcpDir, 'build', 'src');
-  if (fs.existsSync(path.join(cdtMcpDir, 'out', 'Default', 'gen', 'src'))) {
-    cdtMcpSrc = path.join(cdtMcpDir, 'out', 'Default', 'gen', 'src');
-  }
-
-  let cdtMcpEntryJs = path.join(cdtMcpSrc, 'bin', 'chrome-devtools-mcp.js');
-
-  if (fs.existsSync(cdtMcpPkgJson)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(cdtMcpPkgJson, 'utf8'));
-      if (pkg.bin) {
-        const binTarget = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin['chrome-devtools-mcp'];
-        if (binTarget) {
-          cdtMcpEntryJs = path.resolve(cdtMcpDir, binTarget);
-        }
-      }
-      if (pkg.main) {
-        cdtMcpSrc = path.dirname(path.resolve(cdtMcpDir, pkg.main));
-      }
-    } catch {}
-  }
-
-  const browserJs = path.join(cdtMcpSrc, 'browser.js');
-  const browserJsBackup = path.join(cdtMcpSrc, 'browser.js.backup');
-  const browserManagerJs = path.join(cdtMcpSrc, 'BrowserManager.js');
-  const browserManagerJsBackup = path.join(cdtMcpSrc, 'BrowserManager.js.backup');
-  const mcpPageJs = path.join(cdtMcpSrc, 'McpPage.js');
-  const mcpPageJsBackup = path.join(cdtMcpSrc, 'McpPage.js.backup');
-  const mcpContextJs = path.join(cdtMcpSrc, 'McpContext.js');
-  const mcpContextJsBackup = path.join(cdtMcpSrc, 'McpContext.js.backup');
-  const edgeLauncherEsm = path.join(cdtMcpSrc, 'edgeLauncher.js');
-  const mcpConfig = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
-  const edgeProfile = path.join(os.homedir(), '.gemini', 'antigravity', 'edge_profile');
+  const cdtMcpSrcOut = path.join(cdtMcpDir, 'out', 'Default', 'gen', 'src');
+  const cdtMcpSrc = fs.existsSync(cdtMcpSrcOut) ? cdtMcpSrcOut : path.join(cdtMcpDir, 'build', 'src');
 
   return {
     baseDir,
@@ -58,20 +27,16 @@ function getAntigravityPaths() {
     appAsarBackup,
     unpackedDir,
     cdtMcpDir,
-    cdtMcpPkgJson,
     cdtMcpSrc,
-    cdtMcpEntryJs,
-    browserJs,
-    browserJsBackup,
-    browserManagerJs,
-    browserManagerJsBackup,
-    mcpPageJs,
-    mcpPageJsBackup,
-    mcpContextJs,
-    mcpContextJsBackup,
-    edgeLauncherEsm,
-    mcpConfig,
-    edgeProfile
+    legacyEdgeLauncherEsm: path.join(cdtMcpSrc, 'edgeLauncher.js'),
+    legacyMcpBackups: [
+      path.join(cdtMcpSrc, 'browser.js.backup'),
+      path.join(cdtMcpSrc, 'BrowserManager.js.backup'),
+      path.join(cdtMcpSrc, 'McpPage.js.backup'),
+      path.join(cdtMcpSrc, 'McpContext.js.backup'),
+    ],
+    mcpConfig: path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json'),
+    edgeProfile: path.join(os.homedir(), '.gemini', 'antigravity', 'edge_profile'),
   };
 }
 
@@ -84,109 +49,50 @@ function isAntigravityRunning() {
   }
 }
 
-function getInstalledCdtMcpVersion(paths) {
-  if (paths.cdtMcpPkgJson && fs.existsSync(paths.cdtMcpPkgJson)) {
+/**
+ * Removes legacy v1 chrome-devtools-mcp patch artifacts from app.asar.unpacked
+ * and removes unused chrome_devtools server entries from ~/.gemini/config/mcp_config.json.
+ */
+function cleanupLegacyMcpArtifacts(paths) {
+  let cleanedSomething = false;
+
+  for (const backupPath of paths.legacyMcpBackups) {
+    if (fs.existsSync(backupPath)) {
+      const targetPath = backupPath.replace(/\.backup$/, '');
+      try {
+        fs.copyFileSync(backupPath, targetPath);
+        fs.unlinkSync(backupPath);
+        cleanedSomething = true;
+      } catch {}
+    }
+  }
+
+  if (fs.existsSync(paths.legacyEdgeLauncherEsm)) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(paths.cdtMcpPkgJson, 'utf8'));
-      return pkg.version || null;
-    } catch {
-      return null;
-    }
+      fs.unlinkSync(paths.legacyEdgeLauncherEsm);
+      cleanedSomething = true;
+    } catch {}
   }
-  return null;
-}
 
-function getLatestCdtMcpVersion() {
-  try {
-    const stdout = child_process.execSync('npm view chrome-devtools-mcp version', {
-      encoding: 'utf8',
-      timeout: 8000,
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim();
-    if (/^\d+\.\d+\.\d+/.test(stdout)) {
-      return stdout;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function stopRunningCdtMcpProcesses() {
-  try {
-    const script = `
-      Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*chrome-devtools-mcp*" } | ForEach-Object {
-        try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+  if (fs.existsSync(paths.mcpConfig)) {
+    try {
+      const raw = fs.readFileSync(paths.mcpConfig, 'utf8');
+      const json = JSON.parse(raw);
+      if (json && json.mcpServers && Object.prototype.hasOwnProperty.call(json.mcpServers, 'chrome_devtools')) {
+        delete json.mcpServers.chrome_devtools;
+        fs.writeFileSync(paths.mcpConfig, JSON.stringify(json, null, 2) + '\n', 'utf8');
+        cleanedSomething = true;
       }
-    `;
-    child_process.execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { stdio: 'ignore' });
-  } catch {}
-}
-
-function updateChromeDevToolsMcp(paths, targetVersion = 'latest') {
-  const tempDir = path.join(os.tmpdir(), 'cdt_mcp_update_' + Date.now());
-  fs.mkdirSync(tempDir, { recursive: true });
-
-  try {
-    stopRunningCdtMcpProcesses();
-    console.log(`      Downloading chrome-devtools-mcp@${targetVersion} via npm pack...`);
-    child_process.execSync(`npm pack chrome-devtools-mcp@${targetVersion}`, {
-      cwd: tempDir,
-      stdio: ['ignore', 'inherit', 'inherit'],
-      timeout: 45000
-    });
-
-    const tgz = fs.readdirSync(tempDir).find(f => f.endsWith('.tgz'));
-    if (!tgz) {
-      throw new Error('Failed to find downloaded chrome-devtools-mcp tarball in ' + tempDir);
-    }
-
-    console.log(`      Extracting ${tgz}...`);
-    child_process.execSync(`tar -xzf "${tgz}"`, {
-      cwd: tempDir,
-      stdio: ['ignore', 'inherit', 'inherit']
-    });
-
-    const extractedPkgDir = path.join(tempDir, 'package');
-    if (!fs.existsSync(extractedPkgDir) || !fs.existsSync(path.join(extractedPkgDir, 'package.json'))) {
-      throw new Error('Extracted package contents are invalid in ' + extractedPkgDir);
-    }
-
-    console.log(`      Deploying chrome-devtools-mcp to ${paths.cdtMcpDir}...`);
-    fs.mkdirSync(path.dirname(paths.cdtMcpDir), { recursive: true });
-
-    if (fs.existsSync(paths.cdtMcpDir)) {
-      fs.rmSync(paths.cdtMcpDir, { recursive: true, force: true });
-    }
-
-    fs.cpSync(extractedPkgDir, paths.cdtMcpDir, { recursive: true });
-
-    // Clean up zombie build/ directory if out/ exists
-    if (fs.existsSync(path.join(paths.cdtMcpDir, 'out')) && fs.existsSync(path.join(paths.cdtMcpDir, 'build'))) {
-      try { fs.rmSync(path.join(paths.cdtMcpDir, 'build'), { recursive: true, force: true }); } catch {}
-    }
-
-    // Clean up stale backup files so fresh backups are taken from the new version
-    const backupsToClean = [
-      paths.browserJsBackup,
-      paths.browserManagerJsBackup,
-      paths.mcpPageJsBackup,
-      paths.mcpContextJsBackup
-    ];
-    for (const b of backupsToClean) {
-      if (fs.existsSync(b)) {
-        try { fs.unlinkSync(b); } catch {}
-      }
-    }
-
-    const newVersion = getInstalledCdtMcpVersion(paths);
-    console.log(`      [OK] chrome-devtools-mcp updated to v${newVersion || targetVersion}.`);
-    return true;
-  } finally {
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    } catch {}
   }
+
+  return cleanedSomething;
 }
 
+/**
+ * Extracts `asarPath` to `destDir` and mirrors existing `unpackedDir` contents
+ * into `destDir/node_modules` so repacking preserves factory unpacked modules.
+ */
 function extractAsarSafe(asarPath, destDir, unpackedDir) {
   const fd = fs.openSync(asarPath, 'r');
   const sizeBuf = Buffer.alloc(8);
@@ -217,7 +123,6 @@ function extractAsarSafe(asarPath, destDir, unpackedDir) {
   walk(header, destDir);
   fs.closeSync(fd);
 
-  // Synchronize unpacked node_modules/chrome-devtools-mcp into temp destDir for repacking
   if (unpackedDir && fs.existsSync(unpackedDir)) {
     const cdtSrc = path.join(unpackedDir, 'node_modules', 'chrome-devtools-mcp');
     const cdtDest = path.join(destDir, 'node_modules', 'chrome-devtools-mcp');
@@ -230,448 +135,196 @@ function extractAsarSafe(asarPath, destDir, unpackedDir) {
   }
 }
 
+function applyPatch(label, src, pattern, replacement) {
+  const matched = typeof pattern === 'string' ? src.includes(pattern) : pattern.test(src);
+  if (!matched) {
+    throw new Error(`[EdgePatcher] Failed to match patch target: ${label}`);
+  }
+  return src.replace(pattern, replacement);
+}
+
+/** Evaluates current v3 installation and legacy cleanup status. */
 function checkStatus() {
   const paths = getAntigravityPaths();
   const checks = {
     antigravityInstalled: fs.existsSync(paths.baseDir),
     appAsarExists: fs.existsSync(paths.appAsar),
     appAsarBackupExists: fs.existsSync(paths.appAsarBackup),
-    edgeLauncherUnpackedExists: fs.existsSync(paths.edgeLauncherEsm),
-    browserJsPatched: false,
-    appAsarPatched: false,
-    mcpConfigConfigured: false
+    edgeCdpEnginePatched: false,
+    edgeCdpIsolatedWorldPatched: false,
+    edgeCompanionUiPatched: false,
+    legacyMcpCleaned: false,
   };
 
-  if (fs.existsSync(paths.browserJs)) {
-    const content = fs.readFileSync(paths.browserJs, 'utf8');
-    checks.browserJsPatched = content.includes('edgeLauncher') || content.includes('http://127.0.0.1:9222');
-  } else {
-    // In chrome-devtools-mcp v1.11+, BrowserManager.js replaced browser.js
-    checks.browserJsPatched = true;
-  }
-
-  checks.browserManagerJsPatched = false;
-  if (fs.existsSync(paths.browserManagerJs)) {
-    const content = fs.readFileSync(paths.browserManagerJs, 'utf8');
-    checks.browserManagerJsPatched = content.includes('ensureEdgeRunning');
-  } else if (fs.existsSync(paths.browserJs)) {
-    checks.browserManagerJsPatched = true;
-  }
-
-  checks.mcpPageJsPatched = false;
-  if (fs.existsSync(paths.mcpPageJs)) {
-    const content = fs.readFileSync(paths.mcpPageJs, 'utf8');
-    checks.mcpPageJsPatched = content.includes('this.#pptrPage?.url() || this.target.url()');
-  }
-
-  checks.mcpContextJsPatched = false;
-  if (fs.existsSync(paths.mcpContextJs)) {
-    const content = fs.readFileSync(paths.mcpContextJs, 'utf8');
-    checks.mcpContextJsPatched = content.includes('!url') && content.includes("return target.type() === 'page';");
-  }
-
-  checks.cdtMcpVersion = getInstalledCdtMcpVersion(paths);
-  checks.cdtMcpLatestVersion = getLatestCdtMcpVersion();
-
-  checks.appAsarPatched = false;
-  checks.webviewVirtualizationPatched = false;
-  checks.edgeCdpActuatorPatched = false;
-  checks.edgeCdpIsolatedWorldPatched = false;
-  checks.builtinBrowserSuppressed = false;
+  let asarHasLegacyMainHook = false;
   if (fs.existsSync(paths.appAsar)) {
     try {
-      const content = fs.readFileSync(paths.appAsar).toString('latin1');
-      checks.appAsarPatched = content.includes('setupEdgeAutoLauncher');
-      checks.webviewVirtualizationPatched = content.includes('edgeVirtualEngine');
-      checks.edgeCdpActuatorPatched = content.includes('dispatchAgentMouse');
-      checks.edgeCdpIsolatedWorldPatched = content.includes('executeInMainIsolatedWorld');
-      checks.builtinBrowserSuppressed = content.includes('__agySuppressBrowserPane');
+      const latin1 = fs.readFileSync(paths.appAsar).toString('latin1');
+      checks.edgeCdpEnginePatched =
+        latin1.includes('edgeVirtualEngine') &&
+        latin1.includes('acquireInteractiveUrl') &&
+        latin1.includes('dispatchAgentMouse');
+      checks.edgeCdpIsolatedWorldPatched = latin1.includes('executeInMainIsolatedWorld');
+      checks.edgeCompanionUiPatched =
+        latin1.includes('installEdgeCompanionSurface') &&
+        latin1.includes('wcv:get-edge-companion-state');
+      asarHasLegacyMainHook = latin1.includes('setupEdgeAutoLauncher');
     } catch {}
   }
 
+  let mcpHasChromeDevtools = false;
   if (fs.existsSync(paths.mcpConfig)) {
     try {
-      const content = fs.readFileSync(paths.mcpConfig, 'utf8');
-      const json = JSON.parse(content);
-      const srv = json.mcpServers && json.mcpServers.chrome_devtools;
-      const targetScript = srv && srv.args && srv.args[0];
-      checks.mcpConfigConfigured = !!(srv && targetScript && fs.existsSync(targetScript));
+      const json = JSON.parse(fs.readFileSync(paths.mcpConfig, 'utf8'));
+      mcpHasChromeDevtools = Boolean(json?.mcpServers?.chrome_devtools);
     } catch {}
   }
 
-  const isFullyPatched = checks.edgeLauncherUnpackedExists && checks.browserJsPatched && checks.browserManagerJsPatched && checks.mcpPageJsPatched && checks.mcpContextJsPatched && checks.appAsarPatched && checks.webviewVirtualizationPatched && checks.edgeCdpActuatorPatched && checks.edgeCdpIsolatedWorldPatched && checks.builtinBrowserSuppressed && checks.mcpConfigConfigured;
-  const isCompletelyOriginal = !checks.edgeLauncherUnpackedExists && !checks.browserJsPatched && !checks.appAsarPatched && !checks.webviewVirtualizationPatched;
+  const hasLegacyBackupFiles = paths.legacyMcpBackups.some((b) => fs.existsSync(b));
+  checks.legacyMcpCleaned =
+    !fs.existsSync(paths.legacyEdgeLauncherEsm) &&
+    !hasLegacyBackupFiles &&
+    !mcpHasChromeDevtools &&
+    !asarHasLegacyMainHook;
+
+  const isFullyPatched =
+    checks.antigravityInstalled &&
+    checks.appAsarExists &&
+    checks.edgeCdpEnginePatched &&
+    checks.edgeCdpIsolatedWorldPatched &&
+    checks.edgeCompanionUiPatched &&
+    checks.legacyMcpCleaned;
+
+  const isCompletelyOriginal =
+    !checks.edgeCdpEnginePatched &&
+    !checks.edgeCdpIsolatedWorldPatched &&
+    !checks.edgeCompanionUiPatched &&
+    !asarHasLegacyMainHook;
 
   let state = 'PARTIAL';
   if (isFullyPatched) state = 'PATCHED';
   else if (isCompletelyOriginal) state = 'UNPATCHED';
 
-  return {
-    state,
-    checks,
-    paths
-  };
+  return { state, checks, paths };
 }
 
-function install(options = {}) {
-  let paths = getAntigravityPaths();
-  const srcDir = path.resolve(__dirname, '..', 'src');
+function patchDistModules(distDir, srcDir) {
+  // 1. Deploy lightweight v3 Edge modules
+  console.log('      Deploying Edge launcher & v3 CDP engine modules to dist/...');
+  const edgeLauncherSrc = path.join(srcDir, 'edgeLauncher.cjs.js');
+  const edgeVirtualEngineSrc = path.join(srcDir, 'edgeVirtualEngine.cjs.js');
+  fs.copyFileSync(edgeLauncherSrc, path.join(distDir, 'edgeLauncher.js'));
+  fs.copyFileSync(edgeLauncherSrc, path.join(distDir, 'edgeLauncher.cjs.js'));
+  fs.copyFileSync(edgeVirtualEngineSrc, path.join(distDir, 'edgeVirtualEngine.js'));
+  fs.copyFileSync(edgeVirtualEngineSrc, path.join(distDir, 'edgeVirtualEngine.cjs.js'));
 
-  console.log('=====================================================');
-  console.log('  Antigravity Microsoft Edge Integration Installer');
-  console.log('=====================================================\n');
+  // 2. Patch dist/utils.js (Keep Hub surface opaque so internal browser hole never punches through)
+  const utilsJsPath = path.join(distDir, 'utils.js');
+  console.log('      Patching utils.js (Opaque hub surface)...');
+  let utilsContent = fs.readFileSync(utilsJsPath, 'utf8');
+  utilsContent = applyPatch(
+    'utils.setHubSurfaceTransparent',
+    utilsContent,
+    /function setHubSurfaceTransparent\(win, transparent\) \{\r?\n\s*if \(!win \|\| typeof win !== 'object'\) \{/,
+    `function setHubSurfaceTransparent(win, transparent) {\n    transparent = false;\n    if (!win || typeof win !== 'object') {`
+  );
+  fs.writeFileSync(utilsJsPath, utilsContent, 'utf8');
 
-  if (!fs.existsSync(paths.baseDir)) {
-    throw new Error(`Antigravity was not found at: ${paths.baseDir}`);
-  }
+  // 3. Patch dist/wcvBrowserRegistry.js
+  const wcvRegistryPath = path.join(distDir, 'wcvBrowserRegistry.js');
+  console.log('      Patching wcvBrowserRegistry.js (Suppress internal WCV & bind Edge tabs)...');
+  let wcvContent = fs.readFileSync(wcvRegistryPath, 'utf8');
 
-  if (isAntigravityRunning() && !options.force) {
-    throw new Error('Antigravity is currently running. Please close Antigravity before applying the patch (or pass --force).');
-  }
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.require',
+    wcvContent,
+    'const utils_1 = require("./utils");',
+    'const utils_1 = require("./utils");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
+  );
 
-  // 1. Ensure latest chrome-devtools-mcp is installed
-  console.log('[1/6] Checking chrome-devtools-mcp version...');
-  const currentVersion = getInstalledCdtMcpVersion(paths);
-  const latestVersion = getLatestCdtMcpVersion();
-  let mcpUpdated = false;
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.setRegistryRef',
+    wcvContent,
+    'exports.wcvBrowserRegistry = new WcvBrowserRegistry();',
+    'exports.wcvBrowserRegistry = new WcvBrowserRegistry();\nedgeVirtualEngine.setRegistryRef(exports.wcvBrowserRegistry);'
+  );
 
-  if (latestVersion && (currentVersion !== latestVersion || options.forceUpdateMcp)) {
-    console.log(`      Updating chrome-devtools-mcp: v${currentVersion || 'none'} -> v${latestVersion}...`);
-    mcpUpdated = updateChromeDevToolsMcp(paths, latestVersion);
-  } else if (latestVersion) {
-    console.log(`      chrome-devtools-mcp is up to date (v${currentVersion}).`);
-  } else {
-    console.log(`      [Info] Unable to query npm registry (offline). Using installed v${currentVersion || 'unknown'}.`);
-  }
-
-  // Refresh paths in case version upgrade shifted source layout
-  paths = getAntigravityPaths();
-
-  // Clean zombie build/ directory if out/ exists
-  if (fs.existsSync(path.join(paths.cdtMcpDir, 'out')) && fs.existsSync(path.join(paths.cdtMcpDir, 'build'))) {
-    try { fs.rmSync(path.join(paths.cdtMcpDir, 'build'), { recursive: true, force: true }); } catch {}
-  }
-
-  // 2. Back up app.asar (only when pristine or no backup exists)
-  const asarBuf = fs.readFileSync(paths.appAsar);
-  const hasAutoLauncher = asarBuf.toString('latin1').includes('setupEdgeAutoLauncher');
-  const asarLatin1 = asarBuf.toString('latin1');
-  const isAsarPatched = hasAutoLauncher &&
-    asarLatin1.includes('dispatchAgentMouse') &&
-    asarLatin1.includes('executeInMainIsolatedWorld') &&
-    asarLatin1.includes('__agySuppressBrowserPane');
-
-  if (fs.existsSync(paths.appAsar) && !hasAutoLauncher) {
-    console.log('[2/6] Backing up pristine app.asar -> app.asar.backup...');
-    fs.copyFileSync(paths.appAsar, paths.appAsarBackup);
-  } else if (fs.existsSync(paths.appAsarBackup)) {
-    console.log('[2/6] Preserving pristine app.asar.backup.');
-  }
-
-  // 3. Back up upstream files (only when pristine or no backup exists)
-  console.log('[3/6] Backing up upstream files...');
-  if (fs.existsSync(paths.browserJs)) {
-    const currentBrowser = fs.readFileSync(paths.browserJs, 'utf8');
-    const isBrowserPatched = currentBrowser.includes('ensureEdgeRunning');
-
-    if (!fs.existsSync(paths.browserJsBackup)) {
-      if (!isBrowserPatched) {
-        fs.copyFileSync(paths.browserJs, paths.browserJsBackup);
-      } else {
-        const cleanBrowser = currentBrowser
-          .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
-          .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?options\.browserURL = "http:\/\/127\.0\.0\.1:9222";\r?\n\s*\}/, '')
-          .replace(/\r?\n\s*\/\/ Wait for initial page target to be ready in Puppeteer[\s\S]*?await new Promise\(r => setTimeout\(r, 25\)\);\r?\n\s*\}/, '');
-        fs.writeFileSync(paths.browserJsBackup, cleanBrowser, 'utf8');
-      }
-    }
-  }
-
-  // 4. Deploy unpacked files (edgeLauncher.esm.js and dynamically patched browser.js / BrowserManager.js / McpPage.js / McpContext.js)
-  console.log('[4/6] Deploying Edge launcher & dynamically patching MCP files in app.asar.unpacked...');
-  const edgeLauncherSrc = path.join(srcDir, 'edgeLauncher.esm.js');
-  const browserJsSrc = path.join(srcDir, 'browser.js');
-
-  fs.mkdirSync(paths.cdtMcpSrc, { recursive: true });
-  fs.copyFileSync(edgeLauncherSrc, paths.edgeLauncherEsm);
-
-  // If browser.js exists, patch it
-  if (fs.existsSync(paths.browserJs)) {
-    let baseBrowserContent = fs.existsSync(paths.browserJsBackup)
-      ? fs.readFileSync(paths.browserJsBackup, 'utf8')
-      : fs.readFileSync(paths.browserJs, 'utf8');
-
-    if (!baseBrowserContent.includes("import { ensureEdgeRunning } from './edgeLauncher.js';")) {
-      baseBrowserContent = "import { ensureEdgeRunning } from './edgeLauncher.js';\n" + baseBrowserContent;
-    }
-    const connectRegex = /(if\s*\(\s*browser\?\.connected\s*\)\s*\{\s*return\s+browser;\s*\})/;
-    if (connectRegex.test(baseBrowserContent) && !baseBrowserContent.includes('await ensureEdgeRunning()')) {
-      baseBrowserContent = baseBrowserContent.replace(
-        connectRegex,
-        `$1\n    await ensureEdgeRunning().catch((err) => {\n        console.error("[EdgeLauncher] ensureEdgeRunning error:", err.message);\n    });\n    if (!options.browserURL && !options.wsEndpoint && !options.userDataDir) {\n        options.browserURL = "http://127.0.0.1:9222";\n    }`
-      );
-    }
-    const pptrConnectedTarget = /(browser\s*=\s*connected;\s*\r?\n\s*\}\s*\r?\n\s*catch)/;
-    if (pptrConnectedTarget.test(baseBrowserContent) && !baseBrowserContent.includes('targetDeadline')) {
-      baseBrowserContent = baseBrowserContent.replace(
-        pptrConnectedTarget,
-        `browser = connected;
-        // Wait for initial page target to be ready in Puppeteer
-        const targetDeadline = Date.now() + 1000;
-        while (Date.now() < targetDeadline) {
-            const pTargets = connected.targets().filter(t => t.type() === 'page');
-            if (pTargets.length > 0 && pTargets.some(t => t.url() && t.url() !== 'about:blank')) {
-                break;
-            }
-            await new Promise(r => setTimeout(r, 25));
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.getActiveTabKeyHelper',
+    wcvContent,
+    'dispose(tabKey, clearEvicted = true) {',
+    `getActiveTabKeyForWindow(win) {
+        const direct = this.activeRequestedTabByWindow.get(win);
+        if (direct && this.entries.has(direct)) {
+            return direct;
         }
+        const vis = this.getVisibleEntryForWindow?.(win);
+        if (vis) return vis.tabKey;
+        for (const [k, e] of this.entries.entries()) {
+            if (e.parentWindow === win) return k;
+        }
+        return null;
     }
-    catch`
-      );
-    }
-    fs.writeFileSync(paths.browserJs, baseBrowserContent, 'utf8');
-  }
+    dispose(tabKey, clearEvicted = true) {`
+  );
 
-  // Dynamically patch BrowserManager.js if present (chrome-devtools-mcp v1.11+)
-  if (fs.existsSync(paths.browserManagerJs)) {
-    const currentBm = fs.readFileSync(paths.browserManagerJs, 'utf8');
-    const isBmPatched = currentBm.includes('ensureEdgeRunning');
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.existingSetVisible',
+    wcvContent,
+    'existing.view.setVisible?.(true);',
+    'existing.view.setVisible?.(false);'
+  );
 
-    if (!fs.existsSync(paths.browserManagerJsBackup)) {
-      console.log('      Backing up BrowserManager.js -> BrowserManager.js.backup...');
-      if (!isBmPatched) {
-        fs.copyFileSync(paths.browserManagerJs, paths.browserManagerJsBackup);
-      } else {
-        const cleanBm = currentBm
-          .replace(/import\s*\{\s*ensureEdgeRunning\s*\}\s*from\s*'\.\/edgeLauncher\.js';\r?\n?/, '')
-          .replace(/\r?\n\s*await ensureEdgeRunning\(\)\.catch\([\s\S]*?this\.#config\.resolved\.browserUrl = ['"]http:\/\/127\.0\.0\.1:9222['"];\r?\n\s*\}/, '')
-          .replace(/\r?\n\s*\/\/ Wait for initial page target to be ready in Puppeteer[\s\S]*?await new Promise\(r => setTimeout\(r, 25\)\);\r?\n\s*\}/, '');
-        fs.writeFileSync(paths.browserManagerJsBackup, cleanBm, 'utf8');
-      }
-    }
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.existingRegisterTab',
+    wcvContent,
+    'return this.toSnapshot(existing);\n        }',
+    'edgeVirtualEngine.registerTab(existing.tabKey, existing.view.webContents, hubSender, existing.lastUrl, this);\n            return this.toSnapshot(existing);\n        }'
+  );
 
-    let baseBmContent = fs.existsSync(paths.browserManagerJsBackup)
-      ? fs.readFileSync(paths.browserManagerJsBackup, 'utf8')
-      : currentBm;
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.acquireRegisterTab',
+    wcvContent,
+    'this.entries.set(request.tabKey, entry);\n        this.byWebContentsId.set(wc.id, entry);',
+    'this.entries.set(request.tabKey, entry);\n        this.byWebContentsId.set(wc.id, entry);\n        edgeVirtualEngine.registerTab(entry.tabKey, wc, hubSender, lastUrl, this);'
+  );
 
-    if (!baseBmContent.includes("import { ensureEdgeRunning } from './edgeLauncher.js';")) {
-      baseBmContent = "import { ensureEdgeRunning } from './edgeLauncher.js';\n" + baseBmContent;
-    }
-
-    const initTarget = /(async\s+#initBrowser\s*\(\s*\)\s*\{)/;
-    if (initTarget.test(baseBmContent) && !baseBmContent.includes('await ensureEdgeRunning()')) {
-      baseBmContent = baseBmContent.replace(
-        initTarget,
-        `$1\n        await ensureEdgeRunning().catch((err) => {\n            console.error('[EdgeLauncher] ensureEdgeRunning error:', err.message);\n        });\n        if (!this.#config.resolved.browserUrl && !this.#config.resolved.wsEndpoint && !this.#config.resolved.userDataDir) {\n            this.#config.resolved.browserUrl = 'http://127.0.0.1:9222';\n        }`
-      );
-    }
-
-    const connectTarget = /(this\.#browser\s*=\s*connected;\s*\r?\n\s*connected\.once\('disconnected')/;
-    if (connectTarget.test(baseBmContent) && !baseBmContent.includes('targetDeadline')) {
-      baseBmContent = baseBmContent.replace(
-        connectTarget,
-        `this.#browser = connected;
-            // Wait for initial page target to be ready in Puppeteer
-            const targetDeadline = Date.now() + 1000;
-            while (Date.now() < targetDeadline) {
-                const pTargets = connected.targets().filter(t => t.type() === 'page');
-                if (pTargets.length > 0 && pTargets.some(t => t.url() && t.url() !== 'about:blank')) {
-                    break;
+  // Replace entire pristine restore/load block cleanly without leaving dangling superseded checks
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.acquireNoInternalLoad',
+    wcvContent,
+    /else \{\s*\/\/ A restored stack is the tab's real history[\s\S]*?this\.markClipEntryRevealReady\(entry, 'load-settled'\);\s*\}\s*\}/,
+    `else {
+                this.bootstrappedBlankEntries.add(entry);
+                await wc.loadURL('about:blank').catch(() => undefined);
+                const isFreshInteractiveTab = !saved &&
+                    (!request.title || request.title === 'New Tab' || request.title === 'about:blank') &&
+                    lastUrl &&
+                    lastUrl !== 'about:blank' &&
+                    /^https:\\/\\/(?:www\\.)?google\\./i.test(lastUrl);
+                if ((isFreshInteractiveTab || edgeVirtualEngine.hasAnyAttachedTab()) &&
+                    lastUrl &&
+                    lastUrl !== 'about:blank' &&
+                    !isExternalAuth &&
+                    (0, webviewBrowser_1.validateWebviewNavigationUrl)(lastUrl, 'http://127.0.0.1').allowed) {
+                    void edgeVirtualEngine.acquireInteractiveUrl(entry.tabKey, lastUrl);
                 }
-                await new Promise(r => setTimeout(r, 25));
-            }
-            connected.once('disconnected'`
-      );
-    }
+            }`
+  );
 
-    fs.writeFileSync(paths.browserManagerJs, baseBmContent, 'utf8');
-  }
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.syncWindowClipAndEntryBounds',
+    wcvContent,
+    /if \(!win \|\| win\.isDestroyed\?\.\(\) \|\| !clipView\) \{\s*return;\s*\}/,
+    `if (!win || win.isDestroyed?.() || !clipView) {\n            return;\n        }\n        try {\n            clipView.setVisible?.(false);\n            clipView.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });\n            for (const e of this.getEntriesForWindow(win)) {\n                e.view?.setVisible?.(false);\n                e.view?.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });\n                clipView.removeChildView?.(e.view);\n                contentViewOf(win)?.removeChildView?.(e.view);\n            }\n        } catch {}\n        return;`
+  );
 
-  // Dynamically patch McpPage.js if present (fixing initial target URL fallback for Edge)
-  if (fs.existsSync(paths.mcpPageJs)) {
-    const currentMcpPage = fs.readFileSync(paths.mcpPageJs, 'utf8');
-    const isMcpPagePatched = currentMcpPage.includes('this.#pptrPage?.url() || this.target.url()');
-
-    if (!fs.existsSync(paths.mcpPageJsBackup)) {
-      console.log('      Backing up McpPage.js -> McpPage.js.backup...');
-      if (!isMcpPagePatched) {
-        fs.copyFileSync(paths.mcpPageJs, paths.mcpPageJsBackup);
-      } else {
-        const cleanMcpPage = currentMcpPage.replace(
-          /return\s*\(this\.#pptrPage\?\.url\(\)\s*\|\|\s*this\.target\.url\(\)\)\s*\?\?\s*'';/,
-          'return this.#pptrPage?.url() ?? this.target.url();'
-        );
-        fs.writeFileSync(paths.mcpPageJsBackup, cleanMcpPage, 'utf8');
-      }
-    }
-
-    let baseMcpPageContent = fs.existsSync(paths.mcpPageJsBackup)
-      ? fs.readFileSync(paths.mcpPageJsBackup, 'utf8')
-      : currentMcpPage;
-
-    const urlRegex = /(url\(\)\s*\{\s*return\s+)this\.#pptrPage\?\.url\(\)\s*\?\?\s*this\.target\.url\(\);(\s*\})/;
-    if (urlRegex.test(baseMcpPageContent)) {
-      baseMcpPageContent = baseMcpPageContent.replace(
-        urlRegex,
-        `$1(this.#pptrPage?.url() || this.target.url()) ?? '';$2`
-      );
-    }
-    fs.writeFileSync(paths.mcpPageJs, baseMcpPageContent, 'utf8');
-  }
-
-  // Dynamically patch McpContext.js if present (fixing target readiness filter and premature page pruning)
-  if (fs.existsSync(paths.mcpContextJs)) {
-    const currentMcpContext = fs.readFileSync(paths.mcpContextJs, 'utf8');
-    const isMcpContextPatched = currentMcpContext.includes('!url') && currentMcpContext.includes("return target.type() === 'page';");
-
-    if (!fs.existsSync(paths.mcpContextJsBackup)) {
-      console.log('      Backing up McpContext.js -> McpContext.js.backup...');
-      if (!isMcpContextPatched) {
-        fs.copyFileSync(paths.mcpContextJs, paths.mcpContextJsBackup);
-      } else {
-        const cleanMcpContext = currentMcpContext.replace(
-          /const url = \(existingMcpPage \? existingMcpPage\.url\(\) : target\.url\(\)\) \|\| target\.url\(\);\r?\n\s*if \(!url\) \{\r?\n\s*return target\.type\(\) === 'page';\r?\n\s*\}/,
-          'const url = existingMcpPage ? existingMcpPage.url() : target.url();'
-        );
-        fs.writeFileSync(paths.mcpContextJsBackup, cleanMcpContext, 'utf8');
-      }
-    }
-
-    let baseMcpContextContent = fs.existsSync(paths.mcpContextJsBackup)
-      ? fs.readFileSync(paths.mcpContextJsBackup, 'utf8')
-      : currentMcpContext;
-
-    const targetUrlCheck = /(#isPageTarget\s*\(\s*target\s*\)\s*\{[\s\S]*?const\s+url\s*=\s*)(existingMcpPage\s*\?\s*existingMcpPage\.url\(\)\s*:\s*target\.url\(\));/;
-    if (targetUrlCheck.test(baseMcpContextContent)) {
-      baseMcpContextContent = baseMcpContextContent.replace(
-        targetUrlCheck,
-        `$1($2) || target.url();\n        if (!url) {\n            return target.type() === 'page';\n        }`
-      );
-    }
-    fs.writeFileSync(paths.mcpContextJs, baseMcpContextContent, 'utf8');
-  }
-
-  // 5. Patch app.asar (if not already patched or if forced / updated)
-  console.log('[5/6] Checking and patching app.asar (Electron main process & webview virtualization)...');
-  if (!isAsarPatched || options.force || mcpUpdated) {
-    console.log('      Extracting app.asar safely (bypassing missing unpacked files)...');
-    const tempExtractDir = path.join(os.tmpdir(), 'antigravity_asar_patch_' + Date.now());
-    const sourceAsar = (paths.appAsarBackup && fs.existsSync(paths.appAsarBackup)) ? paths.appAsarBackup : paths.appAsar;
-    extractAsarSafe(sourceAsar, tempExtractDir, paths.unpackedDir);
-
-    const distDir = path.join(tempExtractDir, 'dist');
-
-    const applyPatch = (label, src, pattern, replacement) => {
-      const matched = typeof pattern === 'string' ? src.includes(pattern) : pattern.test(src);
-      if (!matched) {
-        throw new Error(`[EdgePatcher] Failed to match patch target: ${label}`);
-      }
-      return src.replace(pattern, replacement);
-    };
-
-    // 5a. Deploy edgeLauncher.js and edgeVirtualEngine.js
-    console.log('      Deploying Edge launcher & v2 Edge CDP engine modules to dist/...');
-    const edgeLauncherCjsSrc = path.join(srcDir, 'edgeLauncher.cjs.js');
-    const edgeVirtualEngineCjsSrc = path.join(srcDir, 'edgeVirtualEngine.cjs.js');
-    fs.copyFileSync(edgeLauncherCjsSrc, path.join(distDir, 'edgeLauncher.js'));
-    fs.copyFileSync(edgeLauncherCjsSrc, path.join(distDir, 'edgeLauncher.cjs.js'));
-    fs.copyFileSync(edgeVirtualEngineCjsSrc, path.join(distDir, 'edgeVirtualEngine.js'));
-    fs.copyFileSync(edgeVirtualEngineCjsSrc, path.join(distDir, 'edgeVirtualEngine.cjs.js'));
-
-    // 5b. Patch dist/main.js
-    const mainJsPath = path.join(distDir, 'main.js');
-    let mainContent = fs.readFileSync(mainJsPath, 'utf8');
-    if (!mainContent.includes('setupEdgeAutoLauncher')) {
-      mainContent = 'const edgeLauncher_1 = require("./edgeLauncher");\n' + mainContent;
-      const targetPoint = '(0, updater_1.initAutoUpdater)(HEADLESS, settingsService);';
-      if (mainContent.includes(targetPoint)) {
-        mainContent = mainContent.replace(
-          targetPoint,
-          targetPoint + '\n    // Edge auto-launcher registered for on-demand use (does NOT launch on startup)\n    (0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);'
-        );
-      } else {
-        mainContent += '\n(0, edgeLauncher_1.setupEdgeAutoLauncher)(electron_1.session);\n';
-      }
-      fs.writeFileSync(mainJsPath, mainContent, 'utf8');
-    }
-
-    // 5c. Patch dist/utils.js (Keep Hub window surface opaque so no built-in browser hole ever punches through)
-    const utilsJsPath = path.join(distDir, 'utils.js');
-    if (fs.existsSync(utilsJsPath)) {
-      console.log('      Patching utils.js (Keep hub surface opaque)...');
-      let utilsContent = fs.readFileSync(utilsJsPath, 'utf8');
-      utilsContent = applyPatch(
-        'utils.setHubSurfaceTransparent',
-        utilsContent,
-        /function setHubSurfaceTransparent\(win, transparent\) \{\r?\n\s*if \(!win \|\| typeof win !== 'object'\) \{/,
-        `function setHubSurfaceTransparent(win, transparent) {\n    transparent = false;\n    if (!win || typeof win !== 'object') {`
-      );
-      fs.writeFileSync(utilsJsPath, utilsContent, 'utf8');
-    }
-
-    // 5d. Patch dist/wcvBrowserRegistry.js (Complete internal WCV suppression + Edge session binding)
-    const wcvRegistryPath = path.join(distDir, 'wcvBrowserRegistry.js');
-    if (fs.existsSync(wcvRegistryPath)) {
-      console.log('      Patching wcvBrowserRegistry.js (Complete Two-Layer & Three-Layer suppression + Edge binding)...');
-      let wcvContent = fs.readFileSync(wcvRegistryPath, 'utf8');
-
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.require',
-        wcvContent,
-        'const utils_1 = require("./utils");',
-        'const utils_1 = require("./utils");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
-      );
-
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.setRegistryRef',
-        wcvContent,
-        'exports.wcvBrowserRegistry = new WcvBrowserRegistry();',
-        'exports.wcvBrowserRegistry = new WcvBrowserRegistry();\nedgeVirtualEngine.setRegistryRef(exports.wcvBrowserRegistry);'
-      );
-
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.existingSetVisible',
-        wcvContent,
-        'existing.view.setVisible?.(true);',
-        'existing.view.setVisible?.(false);'
-      );
-
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.existingRegisterTab',
-        wcvContent,
-        'return this.toSnapshot(existing);\n        }',
-        'edgeVirtualEngine.registerTab(existing.tabKey, existing.view.webContents, hubSender, existing.lastUrl, this);\n            return this.toSnapshot(existing);\n        }'
-      );
-
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.acquireRegisterTab',
-        wcvContent,
-        'this.entries.set(request.tabKey, entry);\n        this.byWebContentsId.set(wc.id, entry);',
-        'this.entries.set(request.tabKey, entry);\n        this.byWebContentsId.set(wc.id, entry);\n        edgeVirtualEngine.registerTab(entry.tabKey, wc, hubSender, lastUrl, this);'
-      );
-
-      // Keep dummy Electron WebContents strictly on about:blank (never load real URLs or restore history internally)
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.acquireNoInternalLoad',
-        wcvContent,
-        /const restoreResult = isExternalAuth[\s\S]*?await wc\.loadURL\('about:blank'\)\.catch\(\(\) => undefined\);\s*\}\s*\}/,
-        `this.bootstrappedBlankEntries.add(entry);\n                await wc.loadURL('about:blank').catch(() => undefined);`
-      );
-
-      // Three-layer clip suppression
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.syncWindowClipAndEntryBounds',
-        wcvContent,
-        /if \(!win \|\| win\.isDestroyed\?\.\(\) \|\| !clipView\) \{\s*return;\s*\}/,
-        `if (!win || win.isDestroyed?.() || !clipView) {\n            return;\n        }\n        try {\n            clipView.setVisible?.(false);\n            clipView.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });\n            for (const e of this.getEntriesForWindow(win)) {\n                e.view?.setVisible?.(false);\n                e.view?.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });\n                clipView.removeChildView?.(e.view);\n                contentViewOf(win)?.removeChildView?.(e.view);\n            }\n        } catch {}\n        return;`
-      );
-
-      // Two-layer + show suppression (never attach child view to Electron window or make hub transparent)
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.show',
-        wcvContent,
-        /entry\.view\.webContents\.setAudioMuted\?\.\(this\.userMutedTabs\.has\(tabKey\)\);\s*const clipView = \(0, utils_1\.getHubClipView\)\(entry\.parentWindow\);[\s\S]*?this\.detachVisibleSiblings\(entry\.parentWindow, entry\);\s*return this\.toSnapshot\(entry\);\s*\}/,
-        `entry.view.webContents.setAudioMuted?.(this.userMutedTabs.has(tabKey));
+  // In show(): NEVER auto-launch Edge on standby historical tab restore; switch only if already attached
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.show',
+    wcvContent,
+    /entry\.view\.webContents\.setAudioMuted\?\.\(this\.userMutedTabs\.has\(tabKey\)\);\s*const clipView = \(0, utils_1\.getHubClipView\)\(entry\.parentWindow\);[\s\S]*?this\.detachVisibleSiblings\(entry\.parentWindow, entry\);\s*return this\.toSnapshot\(entry\);\s*\}/,
+    `entry.view.webContents.setAudioMuted?.(this.userMutedTabs.has(tabKey));
         entry.appliedBoundsDip = { x: 0, y: 0, width: 0, height: 0 };
         this.recordNormalizedBoundsDip(entry, boundsDip, optionsDip);
         try {
@@ -683,48 +336,44 @@ function install(options = {}) {
             (0, utils_1.setHubSurfaceTransparent)(entry.parentWindow, false);
         } catch {}
         this.detachVisibleSiblings(entry.parentWindow, entry);
-        void edgeVirtualEngine.activateTab(tabKey);
+        void edgeVirtualEngine.activateIfAttached(tabKey);
         return this.toSnapshot(entry);
     }`
-      );
+  );
 
-      // Suppress setBounds on Electron view
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.setBounds',
-        wcvContent,
-        /if \(entry\.visible && !entry\.view\.webContents\.isDestroyed\(\)\) \{[\s\S]*?entry\.view\.setBounds\(nextBounds\);\s*\}\s*\}/,
-        `try { entry.view?.setVisible?.(false); } catch {}`
-      );
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.setBounds',
+    wcvContent,
+    /if \(entry\.visible && !entry\.view\.webContents\.isDestroyed\(\)\) \{[\s\S]*?entry\.view\.setBounds\(nextBounds\);\s*\}\s*\}/,
+    `try { entry.view?.setVisible?.(false); } catch {}`
+  );
 
-      // Suppress remote stream visible flip & parkHiddenView child attach
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.setRemoteStreamActive',
-        wcvContent,
-        /if \(next\) \{\s*entry\.view\.setVisible\?\.\(true\);\s*\}/,
-        'entry.view.setVisible?.(false);'
-      );
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.setRemoteStreamActive',
+    wcvContent,
+    /if \(next\) \{\s*entry\.view\.setVisible\?\.\(true\);\s*\}/,
+    'entry.view.setVisible?.(false);'
+  );
 
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.parkHiddenView',
-        wcvContent,
-        /contentView\?\.addChildView\?\.\(entry\.view, insertIdx\);\s*entry\.view\.setBounds\?\.\(this\.resolveHiddenBounds\(entry\)\);/,
-        'contentView?.removeChildView?.(entry.view);\n        entry.view.setVisible?.(false);'
-      );
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.parkHiddenView',
+    wcvContent,
+    /contentView\?\.addChildView\?\.\(entry\.view, insertIdx\);\s*entry\.view\.setBounds\?\.\(this\.resolveHiddenBounds\(entry\)\);/,
+    'contentView?.removeChildView?.(entry.view);\n        entry.view.setVisible?.(false);'
+  );
 
-      // Clean up Edge tab on dispose
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.dispose',
-        wcvContent,
-        'const existingEntry = this.entries.get(tabKey);',
-        'edgeVirtualEngine.disposeTab(tabKey);\n        const existingEntry = this.entries.get(tabKey);'
-      );
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.dispose',
+    wcvContent,
+    'const existingEntry = this.entries.get(tabKey);',
+    'edgeVirtualEngine.disposeTab(tabKey);\n        const existingEntry = this.entries.get(tabKey);'
+  );
 
-      // Reflect live Edge snapshot in toSnapshot
-      wcvContent = applyPatch(
-        'wcvBrowserRegistry.toSnapshot',
-        wcvContent,
-        /return \{\s*tabKey: entry\.tabKey,[\s\S]*?lastLoadError: entry\.lastLoadError \?\? null,\s*\};/,
-        `const edgeSnap = edgeVirtualEngine.getTabSnapshotOverride(entry.tabKey);
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.toSnapshot',
+    wcvContent,
+    /return \{\s*tabKey: entry\.tabKey,[\s\S]*?lastLoadError: entry\.lastLoadError \?\? null,\s*\};/,
+    `const edgeSnap = edgeVirtualEngine.getTabSnapshotOverride(entry.tabKey);
         return {
             tabKey: entry.tabKey,
             webContentsId: entry.webContentsId,
@@ -741,46 +390,41 @@ function install(options = {}) {
             lastHttpResponseCode: entry.lastHttpResponseCode ?? null,
             lastLoadError: entry.lastLoadError ?? null,
         };`
-      );
+  );
 
-      fs.writeFileSync(wcvRegistryPath, wcvContent, 'utf8');
-    }
+  fs.writeFileSync(wcvRegistryPath, wcvContent, 'utf8');
 
-    // 5e. Patch dist/wcvZOrderController.js (Sole Edge navigation, sequential input, screenshots & focus)
-    const wcvZOrderPath = path.join(distDir, 'wcvZOrderController.js');
-    if (fs.existsSync(wcvZOrderPath)) {
-      console.log('      Patching wcvZOrderController.js (Sole Edge actuator, focus emulation & screenshots)...');
-      let zorderContent = fs.readFileSync(wcvZOrderPath, 'utf8');
+  // 4. Patch dist/wcvZOrderController.js
+  const wcvZOrderPath = path.join(distDir, 'wcvZOrderController.js');
+  console.log('      Patching wcvZOrderController.js (Direct Edge CDP input & navigation)...');
+  let zorderContent = fs.readFileSync(wcvZOrderPath, 'utf8');
 
-      zorderContent = applyPatch(
-        'wcvZOrderController.require',
-        zorderContent,
-        'const utils_1 = require("./utils");',
-        'const utils_1 = require("./utils");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
-      );
+  zorderContent = applyPatch(
+    'wcvZOrderController.require',
+    zorderContent,
+    'const utils_1 = require("./utils");',
+    'const utils_1 = require("./utils");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
+  );
 
-      // Disable OS catcher hover forwarding to Edge so user's mouse never drives Edge cursor
-      zorderContent = applyPatch(
-        'wcvZOrderController.fireHover',
-        zorderContent,
-        'fireHover(k, x, y, m, oob = false, done) {',
-        'fireHover(k, x, y, m, oob = false, done) {\n        if (done) { void Promise.resolve().then(done); }\n        return;'
-      );
+  zorderContent = applyPatch(
+    'wcvZOrderController.fireHover',
+    zorderContent,
+    'fireHover(k, x, y, m, oob = false, done) {',
+    'fireHover(k, x, y, m, oob = false, done) {\n        if (done) { void Promise.resolve().then(done); }\n        return;'
+  );
 
-      // Sync focus emulation & AI cursor on agent control transitions
-      zorderContent = applyPatch(
-        'wcvZOrderController.setAgentControlling',
-        zorderContent,
-        "this.reconcileWindow(entry.parentWindow, isActive ? 'agent-controlling' : 'agent-controlling-ended');",
-        "this.reconcileWindow(entry.parentWindow, isActive ? 'agent-controlling' : 'agent-controlling-ended');\n        void edgeVirtualEngine.setAgentControlling(tabKey, isActive);"
-      );
+  zorderContent = applyPatch(
+    'wcvZOrderController.setAgentControlling',
+    zorderContent,
+    "this.reconcileWindow(entry.parentWindow, isActive ? 'agent-controlling' : 'agent-controlling-ended');",
+    "this.reconcileWindow(entry.parentWindow, isActive ? 'agent-controlling' : 'agent-controlling-ended');\n        void edgeVirtualEngine.setAgentControlling(tabKey, isActive);"
+  );
 
-      // Forward agent mouse sequentially directly to Edge without Electron pane clamping
-      zorderContent = applyPatch(
-        'wcvZOrderController.dispatchMouseEvent',
-        zorderContent,
-        /async dispatchMouseEvent\(tabKey, params, options\) \{[\s\S]*?finally \{\s*if \(rec\.webContentsId === wcId && rec\.cdpMouseInFlight > 0\) \{\s*rec\.cdpMouseInFlight--;\s*\}\s*\}\s*\}/,
-        `async dispatchMouseEvent(tabKey, params, options) {
+  zorderContent = applyPatch(
+    'wcvZOrderController.dispatchMouseEvent',
+    zorderContent,
+    /async dispatchMouseEvent\(tabKey, params, options\) \{[\s\S]*?finally \{\s*if \(rec\.webContentsId === wcId && rec\.cdpMouseInFlight > 0\) \{\s*rec\.cdpMouseInFlight--;\s*\}\s*\}\s*\}/,
+    `async dispatchMouseEvent(tabKey, params, options) {
         const entry = this.registry.getEntry(tabKey);
         if (!entry || entry.view.webContents.isDestroyed()) {
             return;
@@ -790,31 +434,31 @@ function install(options = {}) {
         }
         return edgeVirtualEngine.dispatchAgentMouse(tabKey, params);
     }`
-      );
+  );
 
-      zorderContent = applyPatch(
-        'wcvZOrderController.dispatchKeyEvent',
-        zorderContent,
-        /async dispatchKeyEvent\(tabKey, params\) \{[\s\S]*?await this\.sendCdp\(tabKey, 'Input\.dispatchKeyEvent', cdpParams\);\s*\}/,
-        `async dispatchKeyEvent(tabKey, params) {
+  zorderContent = applyPatch(
+    'wcvZOrderController.dispatchKeyEvent',
+    zorderContent,
+    /async dispatchKeyEvent\(tabKey, params\) \{[\s\S]*?await this\.sendCdp\(tabKey, 'Input\.dispatchKeyEvent', cdpParams\);\s*\}/,
+    `async dispatchKeyEvent(tabKey, params) {
         return edgeVirtualEngine.dispatchAgentKey(tabKey, params);
     }`
-      );
+  );
 
-      zorderContent = applyPatch(
-        'wcvZOrderController.insertText',
-        zorderContent,
-        /async insertText\(tabKey, text\) \{\s*await this\.sendCdp\(tabKey, 'Input\.insertText', \{ text \}\);\s*\}/,
-        `async insertText(tabKey, text) {
+  zorderContent = applyPatch(
+    'wcvZOrderController.insertText',
+    zorderContent,
+    /async insertText\(tabKey, text\) \{\s*await this\.sendCdp\(tabKey, 'Input\.insertText', \{ text \}\);\s*\}/,
+    `async insertText(tabKey, text) {
         return edgeVirtualEngine.insertEdgeText(tabKey, text);
     }`
-      );
+  );
 
-      zorderContent = applyPatch(
-        'wcvZOrderController.capturePageImage',
-        zorderContent,
-        'async capturePageImage(tabKey) {',
-        `async capturePageImage(tabKey) {
+  zorderContent = applyPatch(
+    'wcvZOrderController.capturePageImage',
+    zorderContent,
+    'async capturePageImage(tabKey) {',
+    `async capturePageImage(tabKey) {
         try {
             const edgeShot = await edgeVirtualEngine.captureEdgePageNativeImage(electron_1.nativeImage, tabKey);
             if (edgeShot && !edgeShot.isEmpty?.()) {
@@ -822,14 +466,13 @@ function install(options = {}) {
             }
         } catch {}
         return null;`
-      );
+  );
 
-      // Route navigate() exclusively to Edge without calling internal wc.loadURL()
-      zorderContent = applyPatch(
-        'wcvZOrderController.navigate',
-        zorderContent,
-        /async navigate\(tabKey, url\) \{[\s\S]*?if \(!\(0, webviewBrowser_1\.validateWebviewNavigationUrl\)\(url, 'http:\/\/127\.0\.0\.1'\)\.allowed\) \{\s*return false;\s*\}/,
-        `async navigate(tabKey, url) {
+  zorderContent = applyPatch(
+    'wcvZOrderController.navigate',
+    zorderContent,
+    /async navigate\(tabKey, url\) \{[\s\S]*?return true;\s*\}(?=\s*emitZOrderChanged)/,
+    `async navigate(tabKey, url) {
         const entry = this.registry.getEntry(tabKey);
         if (!entry || entry.view.webContents.isDestroyed()) {
             return false;
@@ -843,126 +486,139 @@ function install(options = {}) {
         }
         this.registry.noteExternalNavigation(tabKey, url);
         return edgeVirtualEngine.navigateTab(tabKey, url);
-        if (false)`
-      );
+    }`
+  );
 
-      fs.writeFileSync(wcvZOrderPath, zorderContent, 'utf8');
-    }
+  fs.writeFileSync(wcvZOrderPath, zorderContent, 'utf8');
 
-    // 5f. Patch dist/wcvIpcHandlers.js (Forward cursor state pushes, navigation controls & raw agent mouse coords)
-    const wcvIpcPath = path.join(distDir, 'wcvIpcHandlers.js');
-    if (fs.existsSync(wcvIpcPath)) {
-      console.log('      Patching wcvIpcHandlers.js (Cursor state sync, wcv:control & raw coords)...');
-      let wcvIpcContent = fs.readFileSync(wcvIpcPath, 'utf8');
+  // 5. Patch dist/wcvIpcHandlers.js
+  const wcvIpcPath = path.join(distDir, 'wcvIpcHandlers.js');
+  console.log('      Patching wcvIpcHandlers.js (Cursor bridge, controls & Companion IPCs)...');
+  let wcvIpcContent = fs.readFileSync(wcvIpcPath, 'utf8');
 
-      wcvIpcContent = applyPatch(
-        'wcvIpcHandlers.require',
-        wcvIpcContent,
-        'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");',
-        'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
-      );
+  wcvIpcContent = applyPatch(
+    'wcvIpcHandlers.require',
+    wcvIpcContent,
+    'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");',
+    'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
+  );
 
-      wcvIpcContent = applyPatch(
-        'wcvIpcHandlers.dropCursor',
-        wcvIpcContent,
-        'const drop = (k) => void (cursors.delete(k) && emit(k, null));',
-        'const drop = (k) => void (edgeVirtualEngine.updateCursorState(k, null), cursors.delete(k) && emit(k, null));'
-      );
+  wcvIpcContent = applyPatch(
+    'wcvIpcHandlers.dropCursor',
+    wcvIpcContent,
+    'const drop = (k) => void (cursors.delete(k) && emit(k, null));',
+    'const drop = (k) => void (edgeVirtualEngine.updateCursorState(k, null), cursors.delete(k) && emit(k, null));'
+  );
 
-      wcvIpcContent = applyPatch(
-        'wcvIpcHandlers.pushCursor',
-        wcvIpcContent,
-        'cursors.set(k, { state, webContentsId, hubSenderId: hubSender.id });',
-        'cursors.set(k, { state, webContentsId, hubSenderId: hubSender.id });\n        edgeVirtualEngine.updateCursorState(k, state);'
-      );
+  wcvIpcContent = applyPatch(
+    'wcvIpcHandlers.pushCursor',
+    wcvIpcContent,
+    'cursors.set(k, { state, webContentsId, hubSenderId: hubSender.id });',
+    'cursors.set(k, { state, webContentsId, hubSenderId: hubSender.id });\n        edgeVirtualEngine.updateCursorState(k, state);'
+  );
 
-      wcvIpcContent = applyPatch(
-        'wcvIpcHandlers.control',
-        wcvIpcContent,
-        'const history = wc.navigationHistory;',
-        `if (['goBack', 'back', 'goForward', 'forward', 'reload', 'stop'].includes(action) && edgeVirtualEngine.hasTab(tabKey)) {
+  wcvIpcContent = applyPatch(
+    'wcvIpcHandlers.control',
+    wcvIpcContent,
+    'const history = wc.navigationHistory;',
+    `if (['goBack', 'back', 'goForward', 'forward', 'reload', 'stop'].includes(action) && edgeVirtualEngine.hasTab(tabKey)) {
             return edgeVirtualEngine.controlTab(tabKey, action);
         }
         const history = wc.navigationHistory;`
-      );
+  );
 
-      wcvIpcContent = applyPatch(
-        'wcvIpcHandlers.sendMouse',
-        wcvIpcContent,
-        'return controller.dispatchMouseEvent(tabKey, hubCssMouseToDip(event, params, coordSpace));',
-        `const entry = registry.getEntry(tabKey);
+  wcvIpcContent = applyPatch(
+    'wcvIpcHandlers.sendMouse',
+    wcvIpcContent,
+    'return controller.dispatchMouseEvent(tabKey, hubCssMouseToDip(event, params, coordSpace));',
+    `const entry = registry.getEntry(tabKey);
             const mapped = entry?.isAgentStepActive ? params : hubCssMouseToDip(event, params, coordSpace);
             return controller.dispatchMouseEvent(tabKey, mapped);`
-      );
+  );
 
-      wcvIpcContent = applyPatch(
-        'wcvIpcHandlers.setViewportSize',
-        wcvIpcContent,
-        'return controller.setViewportSize(tabKey, size);',
-        `if (edgeVirtualEngine.hasTab(tabKey)) {\n            return null;\n        }\n        return controller.setViewportSize(tabKey, size);`
-      );
+  wcvIpcContent = applyPatch(
+    'wcvIpcHandlers.setViewportSize',
+    wcvIpcContent,
+    'return controller.setViewportSize(tabKey, size);',
+    `if (edgeVirtualEngine.hasTab(tabKey)) {\n            return null;\n        }\n        return controller.setViewportSize(tabKey, size);`
+  );
 
-      fs.writeFileSync(wcvIpcPath, wcvIpcContent, 'utf8');
-    }
+  wcvIpcContent = applyPatch(
+    'wcvIpcHandlers.companionIpcs',
+    wcvIpcContent,
+    "registerHandle('wcv:dispose', (event, tabKey) => {",
+    `registerHandle('wcv:get-edge-companion-state', async (event, includeScreenshot) => {
+        const { win } = assertAuthorizedWcvCaller(event, registry);
+        const tabKey = registry.getActiveTabKeyForWindow?.(win) ?? null;
+        return edgeVirtualEngine.getCompanionState(tabKey, Boolean(includeScreenshot));
+    });
+    registerHandle('wcv:focus-edge-window', async (event) => {
+        const { win } = assertAuthorizedWcvCaller(event, registry);
+        const tabKey = registry.getActiveTabKeyForWindow?.(win) ?? null;
+        return edgeVirtualEngine.focusEdgeWindow(tabKey);
+    });
+    registerHandle('wcv:dispose', (event, tabKey) => {`
+  );
 
-    // 5g. Patch dist/ipcHandlers.js (Route isolated-world JS, frames, network, dialogs, uploads directly to Edge)
-    const ipcHandlersPath = path.join(distDir, 'ipcHandlers.js');
-    if (fs.existsSync(ipcHandlersPath)) {
-      console.log('      Patching ipcHandlers.js (DOM/JS isolated worlds, OOPIFs, network, dialogs & uploads)...');
-      let ipcContent = fs.readFileSync(ipcHandlersPath, 'utf8');
+  fs.writeFileSync(wcvIpcPath, wcvIpcContent, 'utf8');
 
-      ipcContent = applyPatch(
-        'ipcHandlers.require',
-        ipcContent,
-        'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");',
-        'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
-      );
+  // 6. Patch dist/ipcHandlers.js
+  const ipcHandlersPath = path.join(distDir, 'ipcHandlers.js');
+  console.log('      Patching ipcHandlers.js (Edge isolated worlds, frames, network, dialogs & uploads)...');
+  let ipcContent = fs.readFileSync(ipcHandlersPath, 'utf8');
 
-      ipcContent = applyPatch(
-        'ipcHandlers.executeJsIsolatedWorld',
-        ipcContent,
-        'return (0, isolatedWorldExec_1.executeJavaScriptInIsolatedWorldWhenReady)(wc, worldId, [{ code }], false);',
-        `if (edgeVirtualEngine.hasTabByWcId(webContentsId)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.require',
+    ipcContent,
+    'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");',
+    'const wcvBrowserRegistry_1 = require("./wcvBrowserRegistry");\nconst edgeVirtualEngine = require("./edgeVirtualEngine");'
+  );
+
+  ipcContent = applyPatch(
+    'ipcHandlers.executeJsIsolatedWorld',
+    ipcContent,
+    'return (0, isolatedWorldExec_1.executeJavaScriptInIsolatedWorldWhenReady)(wc, worldId, [{ code }], false);',
+    `if (edgeVirtualEngine.hasTabByWcId(webContentsId)) {
             return edgeVirtualEngine.executeInMainIsolatedWorld(webContentsId, worldId, code);
         }
         return (0, isolatedWorldExec_1.executeJavaScriptInIsolatedWorldWhenReady)(wc, worldId, [{ code }], false);`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.getNetworkRequests',
-        ipcContent,
-        'return guestNetworkController_1.guestNetworkController.getRequests(wc.id);',
-        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.getNetworkRequests',
+    ipcContent,
+    'return guestNetworkController_1.guestNetworkController.getRequests(wc.id);',
+    `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
             return edgeVirtualEngine.getNetworkRequests(wc.id);
         }
         return guestNetworkController_1.guestNetworkController.getRequests(wc.id);`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.clearNetworkRequests',
-        ipcContent,
-        'return guestNetworkController_1.guestNetworkController.clearRequests(wc.id);',
-        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.clearNetworkRequests',
+    ipcContent,
+    'return guestNetworkController_1.guestNetworkController.clearRequests(wc.id);',
+    `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
             return edgeVirtualEngine.clearNetworkRequests(wc.id);
         }
         return guestNetworkController_1.guestNetworkController.clearRequests(wc.id);`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.setDialogPolicy',
-        ipcContent,
-        'return guestDialogController_1.guestDialogController.setPolicy(wc, sender, safePolicy);',
-        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.setDialogPolicy',
+    ipcContent,
+    'return guestDialogController_1.guestDialogController.setPolicy(wc, sender, safePolicy);',
+    `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
             return edgeVirtualEngine.setDialogPolicy(wc.id, safePolicy);
         }
         return guestDialogController_1.guestDialogController.setPolicy(wc, sender, safePolicy);`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.handleDialog',
-        ipcContent,
-        'return guestDialogController_1.guestDialogController.handleDialog(wc, {',
-        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.handleDialog',
+    ipcContent,
+    'return guestDialogController_1.guestDialogController.handleDialog(wc, {',
+    `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
             return edgeVirtualEngine.handleJavaScriptDialog(wc.id, {
                 ...(typeof decision?.dialogId === 'string' ? { dialogId: decision.dialogId } : {}),
                 accept: Boolean(decision?.accept),
@@ -970,163 +626,330 @@ function install(options = {}) {
             });
         }
         return guestDialogController_1.guestDialogController.handleDialog(wc, {`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.setFileChooserPolicy',
-        ipcContent,
-        'return guestFileChooserController_1.guestFileChooserController.setPolicy(wc, sender, {',
-        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.setFileChooserPolicy',
+    ipcContent,
+    'return guestFileChooserController_1.guestFileChooserController.setPolicy(wc, sender, {',
+    `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
             return edgeVirtualEngine.setFileChooserPolicy(wc.id, {
                 enabled: Boolean(policy?.enabled),
                 ...(typeof policy?.tabKey === 'string' ? { tabKey: policy.tabKey } : {}),
             });
         }
         return guestFileChooserController_1.guestFileChooserController.setPolicy(wc, sender, {`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.handleFileChooser',
-        ipcContent,
-        'return guestFileChooserController_1.guestFileChooserController.handleFileChooser(wc, pinned);',
-        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.handleFileChooser',
+    ipcContent,
+    'return guestFileChooserController_1.guestFileChooserController.handleFileChooser(wc, pinned);',
+    `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
             return edgeVirtualEngine.handleFileChooser(wc.id, pinned);
         }
         return guestFileChooserController_1.guestFileChooserController.handleFileChooser(wc, pinned);`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.setInputFiles',
-        ipcContent,
-        'return guestFileChooserController_1.guestFileChooserController.setInputFiles(wc, {',
-        `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.setInputFiles',
+    ipcContent,
+    'return guestFileChooserController_1.guestFileChooserController.setInputFiles(wc, {',
+    `if (edgeVirtualEngine.hasTabByWcId(wc.id)) {
             return edgeVirtualEngine.setInputFiles(wc.id, {
                 ...request,
                 allowedUploadsDir: pinUploadsRoot(request?.expectedConversationId),
             });
         }
         return guestFileChooserController_1.guestFileChooserController.setInputFiles(wc, {`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.listFrames',
-        ipcContent,
-        "localOnly('webview:list-frames', async (event, wcId, options) => guestFrameBridge_1.guestFrameBridge.listFrames(assertMainFrameGuestCaller(event, wcId, 'webview:list-frames'), options));",
-        `localOnly('webview:list-frames', async (event, wcId, options) => {
+  ipcContent = applyPatch(
+    'ipcHandlers.listFrames',
+    ipcContent,
+    "localOnly('webview:list-frames', async (event, wcId, options) => guestFrameBridge_1.guestFrameBridge.listFrames(assertMainFrameGuestCaller(event, wcId, 'webview:list-frames'), options));",
+    `localOnly('webview:list-frames', async (event, wcId, options) => {
         const wc = assertMainFrameGuestCaller(event, wcId, 'webview:list-frames');
         if (edgeVirtualEngine.hasTabByWcId(wcId)) {
             return edgeVirtualEngine.listFrames(wcId, options);
         }
         return guestFrameBridge_1.guestFrameBridge.listFrames(wc, options);
     });`
-      );
+  );
 
-      ipcContent = applyPatch(
-        'ipcHandlers.executeFrameIsolatedWorld',
-        ipcContent,
-        'return guestFrameBridge_1.guestFrameBridge.executeInFrameIsolatedWorld(wc, frameId, code, expectedOrigin, options);',
-        `if (edgeVirtualEngine.hasTabByWcId(wcId)) {
+  ipcContent = applyPatch(
+    'ipcHandlers.executeFrameIsolatedWorld',
+    ipcContent,
+    'return guestFrameBridge_1.guestFrameBridge.executeInFrameIsolatedWorld(wc, frameId, code, expectedOrigin, options);',
+    `if (edgeVirtualEngine.hasTabByWcId(wcId)) {
             return edgeVirtualEngine.executeInFrameIsolatedWorld(wcId, frameId, code, expectedOrigin, options);
         }
         return guestFrameBridge_1.guestFrameBridge.executeInFrameIsolatedWorld(wc, frameId, code, expectedOrigin, options);`
-      );
+  );
 
-      fs.writeFileSync(ipcHandlersPath, ipcContent, 'utf8');
-    }
+  fs.writeFileSync(ipcHandlersPath, ipcContent, 'utf8');
 
-    // 5h. Patch dist/preload.js (Safely hide built-in browser pane UI without stopping agent)
-    const preloadPath = path.join(distDir, 'preload.js');
-    if (fs.existsSync(preloadPath)) {
-      console.log('      Patching preload.js (Suppress built-in browser pane UI safely)...');
-      let preloadContent = fs.readFileSync(preloadPath, 'utf8');
-      preloadContent = applyPatch(
-        'preload.installHoleReporter',
-        preloadContent,
-        'installWcvThreeLayerHoleReporter();',
-        `installEdgeOnlyBrowserSuppressor();`
-      );
-      preloadContent = applyPatch(
-        'preload.defineSuppressor',
-        preloadContent,
-        'if (!isRemoteWindow) {',
-        `function installEdgeOnlyBrowserSuppressor() {
+  // 7. Patch dist/preload.js (Expose companion APIs & render textured Edge Companion Card inside [data-browser-hole])
+  const preloadPath = path.join(distDir, 'preload.js');
+  console.log('      Patching preload.js (Branded Edge Companion Card + Live Preview)...');
+  let preloadContent = fs.readFileSync(preloadPath, 'utf8');
+
+  preloadContent = applyPatch(
+    'preload.exposeCompanionApi',
+    preloadContent,
+    'ackRemoteControlCommand: (a) => electron_1.ipcRenderer.invoke(\'wcv:remote-control-command-ack\', a),',
+    `ackRemoteControlCommand: (a) => electron_1.ipcRenderer.invoke('wcv:remote-control-command-ack', a),
+    getEdgeCompanionState: (includeScreenshot) => electron_1.ipcRenderer.invoke('wcv:get-edge-companion-state', Boolean(includeScreenshot)),
+    focusEdgeWindow: () => electron_1.ipcRenderer.invoke('wcv:focus-edge-window'),`
+  );
+
+  preloadContent = applyPatch(
+    'preload.installCompanionSurface',
+    preloadContent,
+    'installWcvThreeLayerHoleReporter();',
+    'installEdgeCompanionSurface();'
+  );
+
+  const companionSurfaceFn = `function installEdgeCompanionSurface() {
     const script = \`(() => {
       try {
-        window.__agySuppressBrowserPane = true;
-        if (window.__agySuppressInstalled) return;
-        window.__agySuppressInstalled = true;
-        const styleId = '__agy_edge_only_hide_builtin_browser';
-        const ensureStyle = () => {
-          if (document.getElementById(styleId) || !document.head) return;
-          const st = document.createElement('style');
-          st.id = styleId;
-          st.textContent = '[data-browser-hole] { visibility: hidden !important; pointer-events: none !important; opacity: 0 !important; }';
-          document.head.appendChild(st);
-        };
-        let scheduled = false;
-        const suppress = () => {
-          scheduled = false;
-          ensureStyle();
-          const holes = document.querySelectorAll('[data-browser-hole]');
-          for (const hole of holes) {
-            // Walk up up to 4 ancestors to collapse pure browser-pane wrapper without hurting chat/agent tabs
-            let node = hole;
-            for (let i = 0; i < 4 && node && node.parentElement; i++) {
-              const txt = (node.textContent || '').trim();
-              if (node.querySelector('[role="tablist"]') || txt.length > 800) break;
-              node = node.parentElement;
+        if (window.__agyEdgeCompanionInstalled) return;
+        window.__agyEdgeCompanionInstalled = true;
+        const HOST_ATTR = 'data-agy-edge-companion';
+        let activeState = null;
+        let pollTimer = null;
+        let pendingFetch = false;
+
+        function getActiveHole() {
+          return document.querySelector('[data-browser-hole]:not([data-browser-hole="false"])') ||
+            document.querySelector('[data-browser-hole]');
+        }
+
+        function ensureHost(hole) {
+          let host = hole.querySelector('[' + HOST_ATTR + ']');
+          if (!host) {
+            if (!hole.style.position) hole.style.position = 'relative';
+            host = document.createElement('div');
+            host.setAttribute(HOST_ATTR, '1');
+            host.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;overflow:hidden;';
+            const shadow = host.attachShadow({ mode: 'closed' });
+
+            const el = (tag, cls, txt) => {
+              const node = document.createElement(tag);
+              if (cls) node.className = cls;
+              if (txt !== undefined) node.textContent = txt;
+              return node;
+            };
+
+            const style = el('style', '',
+              '.wrap{box-sizing:border-box;width:100%;height:100%;padding:16px 20px 68px;display:flex;flex-direction:column;gap:12px;background-color:#0c0e13;background-image:radial-gradient(rgba(148,163,184,0.12) 1px,transparent 1px),radial-gradient(ellipse at 50% 0%,rgba(56,189,248,0.08),transparent 65%);background-size:20px 20px,100% 100%;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
+              '.hdr{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;border-radius:10px;background:rgba(17,22,31,0.9);border:1px solid rgba(148,163,184,0.15);backdrop-filter:blur(8px);flex-shrink:0;}' +
+              '.hdr-left{display:flex;align-items:center;gap:10px;min-width:0;}' +
+              '.dot{width:8px;height:8px;border-radius:9999px;flex-shrink:0;background:#f59e0b;box-shadow:0 0 8px rgba(245,158,11,0.55);}' +
+              '.dot.on{background:#22c55e;box-shadow:0 0 10px rgba(34,197,94,0.65);}' +
+              '.meta{display:flex;flex-direction:column;min-width:0;}' +
+              '.title{font-size:12px;font-weight:600;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
+              '.url{font-size:11px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
+              '.actions{display:flex;align-items:center;gap:8px;flex-shrink:0;pointer-events:auto;}' +
+              '.btn{appearance:none;border:1px solid rgba(56,189,248,0.42);background:rgba(14,165,233,0.16);color:#e0f2fe;font:600 11px/1 inherit;padding:7px 12px;border-radius:8px;cursor:pointer;transition:background .15s,border-color .15s;}' +
+              '.btn:hover{background:rgba(14,165,233,0.3);border-color:rgba(56,189,248,0.75);}' +
+              '.stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;position:relative;border-radius:12px;border:1px solid rgba(148,163,184,0.12);background:rgba(9,11,16,0.72);overflow:hidden;padding:10px;box-sizing:border-box;}' +
+              '.shot-box{display:none;align-items:center;justify-content:center;width:100%;height:100%;min-height:0;}' +
+              '.shot-box.show{display:flex;}' +
+              '.shot-inner{position:relative;display:inline-flex;max-width:100%;max-height:100%;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.11);box-shadow:0 16px 40px rgba(0,0,0,0.55);}' +
+              '.shot{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;}' +
+              '.reticle{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:9999px;border:2px solid #38bdf8;background:rgba(56,189,248,0.32);box-shadow:0 0 10px rgba(56,189,248,0.85);display:none;transition:left 120ms ease,top 120ms ease;}' +
+              '.reticle.show{display:block;}' +
+              '.standby{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:24px;max-width:360px;}' +
+              '.standby-badge{font-size:11px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:#38bdf8;background:rgba(56,189,248,0.1);border:1px solid rgba(56,189,248,0.25);padding:4px 10px;border-radius:9999px;}' +
+              '.standby-h{font-size:14px;font-weight:600;color:#f1f5f9;}' +
+              '.standby-p{font-size:12px;line-height:1.45;color:#94a3b8;}'
+            );
+
+            const wrap = el('div', 'wrap');
+            const hdr = el('div', 'hdr');
+            const hdrLeft = el('div', 'hdr-left');
+            const dot = el('div', 'dot');
+            const meta = el('div', 'meta');
+            const title = el('div', 'title', 'Microsoft Edge Companion');
+            const url = el('div', 'url', 'Browser-Agent Profile');
+            meta.append(title, url);
+            hdrLeft.append(dot, meta);
+
+            const actions = el('div', 'actions');
+            const btn = el('button', 'btn', 'Bring Edge to Front');
+            btn.type = 'button';
+            btn.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              try { void window.electronNativeAPI?.wcvBrowser?.focusEdgeWindow?.(); } catch {}
+            });
+            actions.append(btn);
+            hdr.append(hdrLeft, actions);
+
+            const stage = el('div', 'stage');
+            const shotBox = el('div', 'shot-box');
+            const shotInner = el('div', 'shot-inner');
+            const shot = el('img', 'shot');
+            shot.alt = 'Microsoft Edge Live Preview';
+            const reticle = el('div', 'reticle');
+            shotInner.append(shot, reticle);
+            shotBox.append(shotInner);
+
+            const standby = el('div', 'standby');
+            const standbyBadge = el('div', 'standby-badge', 'Browser-Agent Profile');
+            const standbyH = el('div', 'standby-h', 'Synced with Microsoft Edge');
+            const standbyP = el('div', 'standby-p', 'Edge launches automatically when navigating or running an agent task, or click Bring Edge to Front.');
+            standby.append(standbyBadge, standbyH, standbyP);
+
+            stage.append(shotBox, standby);
+            wrap.append(hdr, stage);
+            shadow.append(style, wrap);
+
+            host.__agyRefs = { dot, title, url, btn, shotBox, shot, reticle, standby, standbyH, standbyP };
+            hole.appendChild(host);
+          }
+          return host;
+        }
+
+        function renderState(state) {
+          const hole = getActiveHole();
+          if (!hole) return;
+          const host = ensureHost(hole);
+          const refs = host.__agyRefs;
+          if (!refs || !state) return;
+
+          const attached = Boolean(state.attached);
+          refs.dot.classList.toggle('on', attached);
+          const displayTitle = (state.title || '').trim() || (attached ? 'Active in Microsoft Edge' : 'Standby in Microsoft Edge');
+          const displayUrl = (state.url || '').trim() || 'about:blank';
+          refs.title.textContent = (attached ? 'Edge Active · ' : 'Edge Standby · ') + displayTitle;
+          refs.url.textContent = displayUrl;
+          refs.btn.textContent = attached ? 'Bring Edge to Front' : 'Open in Edge';
+
+          if (attached && state.screenshotDataUrl) {
+            if (refs.shot.src !== state.screenshotDataUrl) {
+              refs.shot.src = state.screenshotDataUrl;
             }
-            if (node && node !== document.body && node !== document.documentElement) {
-              if (!node.querySelector('[data-testid*="chat"], textarea')) {
-                node.style.display = 'none';
-              }
+            refs.shotBox.classList.add('show');
+            refs.standby.style.display = 'none';
+            if (state.cursor && state.cursor.active && state.cursor.xRatio >= 0 && state.cursor.yRatio >= 0) {
+              refs.reticle.style.left = (Math.max(0, Math.min(1, state.cursor.xRatio)) * 100).toFixed(2) + '%';
+              refs.reticle.style.top = (Math.max(0, Math.min(1, state.cursor.yRatio)) * 100).toFixed(2) + '%';
+              refs.reticle.classList.add('show');
+            } else {
+              refs.reticle.classList.remove('show');
             }
+          } else {
+            refs.shotBox.classList.remove('show');
+            refs.reticle.classList.remove('show');
+            refs.standby.style.display = 'flex';
+            refs.standbyH.textContent = attached ? 'Loading Microsoft Edge...' : 'Edge on Standby for Historical Tab';
+            refs.standbyP.textContent = attached
+              ? ('Syncing live preview for ' + displayUrl)
+              : 'Historical tabs stay closed until you click Open in Edge, navigate, or run an agent task.';
+          }
+        }
+
+        async function refreshCompanion(includeScreenshot) {
+          const hole = getActiveHole();
+          if (!hole || pendingFetch) return;
+          const api = window.electronNativeAPI?.wcvBrowser;
+          if (!api?.getEdgeCompanionState) return;
+          pendingFetch = true;
+          try {
+            const st = await api.getEdgeCompanionState(Boolean(includeScreenshot));
+            activeState = st;
+            renderState(st);
+          } catch {}
+          finally {
+            pendingFetch = false;
+          }
+        }
+
+        function syncLoopState() {
+          const hole = getActiveHole();
+          if (hole) {
+            ensureHost(hole);
+            if (!pollTimer) {
+              void refreshCompanion(true);
+              pollTimer = setInterval(() => {
+                if (document.visibilityState === 'visible') {
+                  void refreshCompanion(true);
+                }
+              }, 1100);
+            }
+          } else if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+        }
+
+        try {
+          window.electronNativeAPI?.wcvBrowser?.onGuestEvent?.(() => {
+            if (getActiveHole()) void refreshCompanion(true);
+          });
+        } catch {}
+
+        let rafPending = false;
+        const scheduleSync = () => {
+          if (!rafPending) {
+            rafPending = true;
+            requestAnimationFrame(() => {
+              rafPending = false;
+              syncLoopState();
+              if (activeState) renderState(activeState);
+            });
           }
         };
-        const schedule = () => {
-          if (!scheduled) { scheduled = true; requestAnimationFrame(suppress); }
-        };
+
         if (document.readyState === 'loading') {
-          document.addEventListener('DOMContentLoaded', schedule, { once: true });
+          document.addEventListener('DOMContentLoaded', scheduleSync, { once: true });
         } else {
-          schedule();
+          scheduleSync();
         }
-        new MutationObserver(schedule).observe(document.documentElement || document, { childList: true, subtree: true });
+        new MutationObserver(scheduleSync).observe(document.documentElement || document, { childList: true, subtree: true });
       } catch {}
     })();\`;
     const inject = () => { void electron_1.webFrame?.executeJavaScript?.(script).catch(() => undefined); };
     if (document?.documentElement) inject();
     else window?.addEventListener?.('DOMContentLoaded', inject, { once: true });
 }
-if (!isRemoteWindow) {`
-      );
-      fs.writeFileSync(preloadPath, preloadContent, 'utf8');
+if (!isRemoteWindow) {`;
+
+  preloadContent = applyPatch(
+    'preload.defineCompanionSurface',
+    preloadContent,
+    'if (!isRemoteWindow) {',
+    companionSurfaceFn
+  );
+
+  fs.writeFileSync(preloadPath, preloadContent, 'utf8');
+}
+
+function validatePatchedSyntax(distDir) {
+  const files = [
+    'main.js',
+    'utils.js',
+    'preload.js',
+    'wcvBrowserRegistry.js',
+    'wcvZOrderController.js',
+    'wcvIpcHandlers.js',
+    'ipcHandlers.js',
+    'edgeLauncher.js',
+    'edgeVirtualEngine.js',
+  ];
+  for (const relFile of files) {
+    const targetJs = path.join(distDir, relFile);
+    if (fs.existsSync(targetJs)) {
+      new vm.Script(fs.readFileSync(targetJs, 'utf8'), { filename: relFile });
     }
-
-    // Validate syntax of all patched dist/*.js files before repacking
-    for (const relFile of ['main.js', 'utils.js', 'preload.js', 'wcvBrowserRegistry.js', 'wcvZOrderController.js', 'wcvIpcHandlers.js', 'ipcHandlers.js', 'edgeLauncher.js', 'edgeVirtualEngine.js']) {
-      const targetJs = path.join(distDir, relFile);
-      if (fs.existsSync(targetJs)) {
-        new vm.Script(fs.readFileSync(targetJs, 'utf8'), { filename: relFile });
-      }
-    }
-
-    console.log('      Repacking patched app.asar with unpacked chrome-devtools-mcp...');
-    child_process.execSync(`npx asar pack "${tempExtractDir}" "${paths.appAsar}" --unpack-dir "node_modules/chrome-devtools-mcp"`, { stdio: 'inherit' });
-
-    // Clean temp
-    try { fs.rmSync(tempExtractDir, { recursive: true, force: true }); } catch {}
-  } else {
-    console.log('      app.asar is already patched.');
   }
+}
 
-  // 6. Ensure mcp_config.json has chrome_devtools and edge_profile exists
-  console.log('[6/6] Configuring global MCP registry and dedicated profile directory...');
-  fs.mkdirSync(paths.edgeProfile, { recursive: true });
-
-  // Lock Agent profile name to "Browser-Agent"
+function ensureEdgeProfilePermissions(edgeProfile) {
+  fs.mkdirSync(edgeProfile, { recursive: true });
   try {
-    const agentLocalState = path.join(paths.edgeProfile, 'Local State');
+    const agentLocalState = path.join(edgeProfile, 'Local State');
     if (fs.existsSync(agentLocalState)) {
       const ls = JSON.parse(fs.readFileSync(agentLocalState, 'utf8'));
       if (ls.profile?.info_cache?.Default) {
@@ -1135,7 +958,7 @@ if (!isRemoteWindow) {`
         fs.writeFileSync(agentLocalState, JSON.stringify(ls, null, 2), 'utf8');
       }
     }
-    const agentPref = path.join(paths.edgeProfile, 'Default', 'Preferences');
+    const agentPref = path.join(edgeProfile, 'Default', 'Preferences');
     if (fs.existsSync(agentPref)) {
       const pref = JSON.parse(fs.readFileSync(agentPref, 'utf8'));
       if (!pref.profile) pref.profile = {};
@@ -1145,80 +968,87 @@ if (!isRemoteWindow) {`
     }
   } catch {}
 
-  // Clean stale personal DevToolsActivePort if present
-  try {
-    const personalActivePort = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Edge', 'User Data', 'DevToolsActivePort');
-    if (fs.existsSync(personalActivePort)) fs.unlinkSync(personalActivePort);
-  } catch {}
-
-  // Enforce NTFS ACL permissions so non-admin processes never encounter permission quirks
   try {
     const currentUser = os.userInfo().username;
-    child_process.execSync(`icacls "${paths.edgeProfile}" /grant "Everyone:(OI)(CI)F" "${currentUser}:(OI)(CI)F" /T /C`, { stdio: 'ignore' });
+    child_process.execSync(`icacls "${edgeProfile}" /grant "Everyone:(OI)(CI)F" "${currentUser}:(OI)(CI)F" /T /C`, { stdio: 'ignore' });
   } catch {}
-
-  const mcpConfigDir = path.dirname(paths.mcpConfig);
-  fs.mkdirSync(mcpConfigDir, { recursive: true });
-
-  let mcpJson = { mcpServers: {} };
-  if (fs.existsSync(paths.mcpConfig)) {
-    try {
-      const raw = fs.readFileSync(paths.mcpConfig, 'utf8');
-      mcpJson = JSON.parse(raw);
-    } catch {}
-  }
-
-  if (!mcpJson.mcpServers) mcpJson.mcpServers = {};
-  mcpJson.mcpServers.chrome_devtools = {
-    command: "node",
-    args: [
-      paths.cdtMcpEntryJs,
-      "--no-usage-statistics",
-      "--no-performance-crux",
-      "--browserUrl",
-      "http://127.0.0.1:9222"
-    ]
-  };
-
-  // Write clean UTF-8 without BOM
-  fs.writeFileSync(paths.mcpConfig, JSON.stringify(mcpJson, null, 2) + '\n', 'utf8');
-
-  // Refresh language server MCP registry if running
-  refreshLanguageServer();
-
-  console.log('\n=====================================================');
-  console.log('  SUCCESS: Microsoft Edge integration applied!');
-  console.log('  You can now start Antigravity and use /browser.');
-  console.log('=====================================================\n');
 }
 
-function refreshLanguageServer() {
-  try {
-    const script = `
-      $proc = Get-CimInstance Win32_Process -Filter "Name = 'language_server.exe'" | Select-Object -First 1 ProcessId, CommandLine
-      if ($proc) {
-        $csrf = if ($proc.CommandLine -match '--csrf_token\\s+([a-f0-9\\-]+)') { $matches[1] } else { '' }
-        $ports = Get-NetTCPConnection -OwningProcess $proc.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
-        foreach ($p in $ports) {
-          try {
-            $uri = "http://127.0.0.1:$p/exa.language_server_pb.LanguageServerService/RefreshMcpServers"
-            $headers = @{ 'x-codeium-csrf-token' = $csrf; 'Content-Type' = 'application/json' }
-            Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body '{}' -TimeoutSec 2 | Out-Null
-            Write-Output "Refreshed on port $p"
-          } catch {}
-        }
-      }
-    `;
-    const out = child_process.execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' }).trim();
-    if (out) console.log('  [OK] Language server MCP registry refreshed.');
-  } catch {}
+function install(options = {}) {
+  const paths = getAntigravityPaths();
+  const srcDir = path.resolve(__dirname, '..', 'src');
+
+  console.log('=====================================================');
+  console.log('  Antigravity Microsoft Edge Installer (v3 Clean)');
+  console.log('=====================================================\n');
+
+  if (!fs.existsSync(paths.baseDir)) {
+    throw new Error(`Antigravity was not found at: ${paths.baseDir}`);
+  }
+
+  if (isAntigravityRunning() && !options.force) {
+    throw new Error('Antigravity is currently running. Please close Antigravity before applying the patch (or pass --force).');
+  }
+
+  // [1/4] Protect pristine app.asar.backup
+  const asarLatin1 = fs.readFileSync(paths.appAsar).toString('latin1');
+  const alreadyHasAnyPatch = asarLatin1.includes('edgeVirtualEngine') || asarLatin1.includes('setupEdgeAutoLauncher');
+  if (!fs.existsSync(paths.appAsarBackup)) {
+    if (alreadyHasAnyPatch) {
+      throw new Error('app.asar is already patched and app.asar.backup is missing; cannot recover pristine base.');
+    }
+    console.log('[1/4] Backing up pristine app.asar -> app.asar.backup...');
+    fs.copyFileSync(paths.appAsar, paths.appAsarBackup);
+  } else {
+    console.log('[1/4] Preserving pristine app.asar.backup.');
+  }
+
+  // [2/4] Strip legacy v1 chrome-devtools-mcp files & config entries
+  console.log('[2/4] Cleaning legacy chrome-devtools-mcp artifacts & mcp_config...');
+  const cleaned = cleanupLegacyMcpArtifacts(paths);
+  console.log(cleaned ? '      Removed unused legacy MCP hooks & chrome_devtools config.' : '      Already clean.');
+
+  // [3/4] Extract pristine app.asar, deploy v3 Edge engine, validate syntax & repack
+  console.log('[3/4] Patching Electron dist modules for Edge-Only + Companion UI...');
+  const isV3Patched =
+    asarLatin1.includes('acquireInteractiveUrl') &&
+    asarLatin1.includes('installEdgeCompanionSurface') &&
+    !asarLatin1.includes('setupEdgeAutoLauncher');
+
+  if (!isV3Patched || options.force) {
+    const tempExtractDir = path.join(os.tmpdir(), 'antigravity_asar_v3_' + Date.now());
+    try {
+      extractAsarSafe(paths.appAsarBackup, tempExtractDir, paths.unpackedDir);
+      const distDir = path.join(tempExtractDir, 'dist');
+      patchDistModules(distDir, srcDir);
+      validatePatchedSyntax(distDir);
+      console.log('      Repacking patched app.asar...');
+      child_process.execSync(
+        `npx asar pack "${tempExtractDir}" "${paths.appAsar}" --unpack-dir "node_modules/chrome-devtools-mcp"`,
+        { stdio: 'inherit' }
+      );
+    } finally {
+      try { fs.rmSync(tempExtractDir, { recursive: true, force: true }); } catch {}
+    }
+  } else {
+    console.log('      app.asar already has v3 patch.');
+  }
+
+  // [4/4] Ensure dedicated Browser-Agent Edge profile exists
+  console.log('[4/4] Ensuring dedicated Browser-Agent Edge profile...');
+  ensureEdgeProfilePermissions(paths.edgeProfile);
+
+  console.log('\n=====================================================');
+  console.log('  SUCCESS: Edge-Only v3 integration applied!');
+  console.log('  Restart Antigravity if running to load app.asar.');
+  console.log('=====================================================\n');
 }
 
 function uninstall(options = {}) {
   const paths = getAntigravityPaths();
 
   console.log('=====================================================');
-  console.log('  Antigravity Microsoft Edge Integration Uninstaller');
+  console.log('  Antigravity Microsoft Edge Uninstaller');
   console.log('=====================================================\n');
 
   if (!fs.existsSync(paths.baseDir)) {
@@ -1229,64 +1059,24 @@ function uninstall(options = {}) {
     throw new Error('Antigravity is currently running. Please close Antigravity before uninstalling the patch (or pass --force).');
   }
 
-  // 1. Restore app.asar from backup
   if (fs.existsSync(paths.appAsarBackup)) {
-    console.log('[1/4] Restoring pristine app.asar from backup...');
+    console.log('[1/2] Restoring pristine app.asar from app.asar.backup...');
     fs.copyFileSync(paths.appAsarBackup, paths.appAsar);
   } else {
-    console.log('[1/4] Warning: app.asar.backup not found; cannot restore app.asar.');
+    console.log('[1/2] Warning: app.asar.backup not found; cannot restore app.asar.');
   }
 
-  // 2. Restore browser.js, BrowserManager.js, McpPage.js, and McpContext.js from backup
-  if (fs.existsSync(paths.browserJsBackup)) {
-    console.log('[2/4] Restoring pristine browser.js from backup...');
-    fs.copyFileSync(paths.browserJsBackup, paths.browserJs);
-  }
-  if (fs.existsSync(paths.browserManagerJsBackup)) {
-    console.log('[2/4] Restoring pristine BrowserManager.js from backup...');
-    fs.copyFileSync(paths.browserManagerJsBackup, paths.browserManagerJs);
-  }
-  if (fs.existsSync(paths.mcpPageJsBackup)) {
-    console.log('[2/4] Restoring pristine McpPage.js from backup...');
-    fs.copyFileSync(paths.mcpPageJsBackup, paths.mcpPageJs);
-  }
-  if (fs.existsSync(paths.mcpContextJsBackup)) {
-    console.log('[2/4] Restoring pristine McpContext.js from backup...');
-    fs.copyFileSync(paths.mcpContextJsBackup, paths.mcpContextJs);
-  }
-
-  // 3. Remove edgeLauncher.js from unpacked directory
-  if (fs.existsSync(paths.edgeLauncherEsm)) {
-    console.log('[3/4] Removing edgeLauncher.js from app.asar.unpacked...');
-    try { fs.unlinkSync(paths.edgeLauncherEsm); } catch {}
-  }
-
-  // 4. Remove chrome_devtools from mcp_config.json if requested
-  console.log('[4/4] Cleaning global mcp_config.json...');
-  if (fs.existsSync(paths.mcpConfig)) {
-    try {
-      const raw = fs.readFileSync(paths.mcpConfig, 'utf8');
-      const json = JSON.parse(raw);
-      if (json.mcpServers && json.mcpServers.chrome_devtools) {
-        delete json.mcpServers.chrome_devtools;
-        fs.writeFileSync(paths.mcpConfig, JSON.stringify(json, null, 2) + '\n', 'utf8');
-      }
-    } catch {}
-  }
+  console.log('[2/2] Cleaning legacy MCP artifacts...');
+  cleanupLegacyMcpArtifacts(paths);
 
   console.log('\n=====================================================');
-  console.log('  SUCCESS: Microsoft Edge integration reverted.');
-  console.log('  Antigravity restored to factory Chrome configuration.');
+  console.log('  UNINSTALLED: Antigravity restored to factory state.');
   console.log('=====================================================\n');
 }
 
 module.exports = {
   getAntigravityPaths,
-  isAntigravityRunning,
   checkStatus,
   install,
   uninstall,
-  getInstalledCdtMcpVersion,
-  getLatestCdtMcpVersion,
-  updateChromeDevToolsMcp
 };
