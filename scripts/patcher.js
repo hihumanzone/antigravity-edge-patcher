@@ -279,6 +279,7 @@ function checkStatus() {
       const content = fs.readFileSync(paths.appAsar).toString('latin1');
       checks.appAsarPatched = content.includes('setupEdgeAutoLauncher');
       checks.webviewVirtualizationPatched = content.includes('edgeVirtualEngine');
+      checks.edgeCdpActuatorPatched = content.includes('dispatchEdgeInput');
     } catch {}
   }
 
@@ -348,7 +349,7 @@ function install(options = {}) {
   // 2. Back up app.asar (only when pristine or no backup exists)
   const asarBuf = fs.readFileSync(paths.appAsar);
   const hasAutoLauncher = asarBuf.toString('latin1').includes('setupEdgeAutoLauncher');
-  const isAsarPatched = hasAutoLauncher && asarBuf.toString('latin1').includes('edgeVirtualEngine');
+  const isAsarPatched = hasAutoLauncher && asarBuf.toString('latin1').includes('dispatchEdgeInput');
 
   if (fs.existsSync(paths.appAsar) && !hasAutoLauncher) {
     console.log('[2/6] Backing up pristine app.asar -> app.asar.backup...');
@@ -577,11 +578,33 @@ function install(options = {}) {
       fs.writeFileSync(mainJsPath, mainContent, 'utf8');
     }
 
-    // 5c. Patch dist/wcvBrowserRegistry.js (clean session cookie synchronization without duplicate window mirroring)
+    // 5c. Patch dist/wcvBrowserRegistry.js (Suppress built-in browser view & sync cookies)
     const wcvRegistryPath = path.join(distDir, 'wcvBrowserRegistry.js');
     if (fs.existsSync(wcvRegistryPath)) {
-      console.log('      Patching wcvBrowserRegistry.js (Edge profile cookie synchronization)...');
+      console.log('      Patching wcvBrowserRegistry.js (Suppressing internal webview & syncing Edge cookies)...');
       let wcvContent = fs.readFileSync(wcvRegistryPath, 'utf8');
+
+      // Suppress built-in browser WebContentsView from rendering or splitting the window
+      const syncBoundsTarget = 'if (!win || win.isDestroyed?.() || !clipView) {';
+      if (wcvContent.includes(syncBoundsTarget) && !wcvContent.includes('// Suppress built-in browser view')) {
+        wcvContent = wcvContent.replace(
+          syncBoundsTarget,
+          `if (!win || win.isDestroyed?.() || !clipView) {
+            return;
+        }
+        // Suppress built-in browser view: Microsoft Edge is the dedicated external browser
+        try {
+            clipView.setVisible?.(false);
+            clipView.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });
+            for (const e of this.getEntriesForWindow(win)) {
+                e.view?.setVisible?.(false);
+                e.view?.setBounds?.({ x: 0, y: 0, width: 0, height: 0 });
+            }
+        } catch {}
+        return;`
+        );
+      }
+
       if (!wcvContent.includes('edgeVirtualEngine')) {
         const targetListener = 'wc.setMaxListeners?.(32);';
         if (wcvContent.includes(targetListener)) {
@@ -603,8 +626,8 @@ function install(options = {}) {
             'try { const edgeVirtualEngine = require("./edgeVirtualEngine"); void edgeVirtualEngine.syncEdgeCookiesToSession(existing.view.webContents.session); } catch {}\n            ' + reparentPoint
           );
         }
-        fs.writeFileSync(wcvRegistryPath, wcvContent, 'utf8');
       }
+      fs.writeFileSync(wcvRegistryPath, wcvContent, 'utf8');
     }
 
     // 5d. browserStream/browserViewerTabDriver.js clean passthrough
@@ -613,11 +636,59 @@ function install(options = {}) {
       console.log('      Verifying browserViewerTabDriver.js...');
     }
 
-    // 5e. Patch dist/wcvZOrderController.js (Session cookie synchronization for built-in browser)
+    // 5e. Patch dist/wcvZOrderController.js (Route CDP, Navigation, and Screenshots directly to Edge)
     const wcvZOrderPath = path.join(distDir, 'wcvZOrderController.js');
     if (fs.existsSync(wcvZOrderPath)) {
-      console.log('      Patching wcvZOrderController.js (Session cookie synchronization)...');
+      console.log('      Patching wcvZOrderController.js (CDP input, AI cursor & Edge capture)...');
       let zorderContent = fs.readFileSync(wcvZOrderPath, 'utf8');
+
+      // Forward CDP commands directly to Edge and update AI mouse cursor
+      const sendCdpTarget = 'async sendCdp(tabKey, method, params) {';
+      if (zorderContent.includes(sendCdpTarget) && !zorderContent.includes('edgeVirtualEngine.dispatchEdgeInput')) {
+        zorderContent = zorderContent.replace(
+          sendCdpTarget,
+          `async sendCdp(tabKey, method, params) {
+        try {
+            const edgeVirtualEngine = require('./edgeVirtualEngine');
+            if (method && method.startsWith('Input.')) {
+                void edgeVirtualEngine.dispatchEdgeInput(method, params);
+            } else if (method === 'Page.navigate' && params && params.url) {
+                void edgeVirtualEngine.navigateEdge(params.url);
+            } else {
+                void edgeVirtualEngine.sendCdpToEdge(method, params);
+            }
+        } catch {}`
+        );
+      }
+
+      // Route tab navigation directly to Edge
+      const navTarget = 'async navigate(tabKey, url) {';
+      if (zorderContent.includes(navTarget) && !zorderContent.includes('edgeVirtualEngine.navigateEdge(url)')) {
+        zorderContent = zorderContent.replace(
+          navTarget,
+          `async navigate(tabKey, url) {
+        try {
+            const edgeVirtualEngine = require('./edgeVirtualEngine');
+            void edgeVirtualEngine.navigateEdge(url);
+        } catch {}`
+        );
+      }
+
+      // Capture screenshot directly from Edge
+      const captureTarget = 'async capturePageImage(tabKey) {';
+      if (zorderContent.includes(captureTarget) && !zorderContent.includes('edgeVirtualEngine.captureEdgePageNativeImage')) {
+        zorderContent = zorderContent.replace(
+          captureTarget,
+          `async capturePageImage(tabKey) {
+        try {
+            const edgeVirtualEngine = require('./edgeVirtualEngine');
+            const edgeShot = await edgeVirtualEngine.captureEdgePageNativeImage(electron_1.nativeImage);
+            if (edgeShot && !edgeShot.isEmpty?.()) {
+                return edgeShot;
+            }
+        } catch {}`
+        );
+      }
 
       // Ensure clean cookie synchronization on navigation without phantom window launching
       const authBlock = 'if ((0, webviewBrowser_1.isExternalOnlyAuthUrl)(url)) {';

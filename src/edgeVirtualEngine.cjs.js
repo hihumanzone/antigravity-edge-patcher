@@ -15,6 +15,7 @@ let _persistentWs = null;
 let _persistentWsUrl = null;
 let _cdpNextId = 1;
 const _cdpPending = new Map();
+let _cursorInjectedTargets = new Set();
 
 function closePersistentCdp() {
   if (_persistentWs) {
@@ -221,6 +222,97 @@ async function getPrimaryEdgePage(port = DEFAULT_PORT, autoLaunch = false) {
 }
 
 /**
+ * Injects the visual AI Mouse Pointer into Microsoft Edge pages.
+ */
+const AI_CURSOR_SNIPPET = `(() => {
+  if (window.__agyCursorInjected) return;
+  window.__agyCursorInjected = true;
+
+  const cursor = document.createElement('div');
+  cursor.id = 'antigravity-ai-cursor';
+  cursor.innerHTML = \`
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 2px 5px rgba(0,0,0,0.45));">
+      <path d="M5.5 3.21V20.8c0 .45.54.67.85.35l4.86-4.86a.5.5 0 0 1 .35-.15h6.87c.45 0 .67-.54.35-.85L5.5 3.21z" fill="#FFFFFF" stroke="#000000" stroke-width="1.5" stroke-linejoin="round"/>
+    </svg>
+    <div id="antigravity-ai-ripple" style="position: absolute; top: 0; left: 0; width: 22px; height: 22px; border-radius: 50%; border: 2.5px solid #2563eb; transform: translate(-50%, -50%) scale(0); opacity: 0; pointer-events: none;"></div>
+  \`;
+  Object.assign(cursor.style, {
+    position: 'fixed',
+    top: '0px',
+    left: '0px',
+    zIndex: '2147483647',
+    pointerEvents: 'none',
+    transform: 'translate(-2px, -2px)',
+    transition: 'left 0.05s linear, top 0.05s linear',
+    willChange: 'left, top'
+  });
+
+  const attach = () => {
+    if (!document.getElementById('antigravity-ai-cursor')) {
+      const root = document.body || document.documentElement;
+      if (root) root.appendChild(cursor);
+    }
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+
+  window.__agySetCursorPos = (x, y) => {
+    attach();
+    cursor.style.left = x + 'px';
+    cursor.style.top = y + 'px';
+  };
+
+  window.__agyPlayClickRipple = () => {
+    const ripple = document.getElementById('antigravity-ai-ripple');
+    if (!ripple) return;
+    ripple.style.transition = 'none';
+    ripple.style.transform = 'translate(-50%, -50%) scale(0)';
+    ripple.style.opacity = '0.9';
+    requestAnimationFrame(() => {
+      ripple.style.transition = 'transform 0.35s ease-out, opacity 0.35s ease-out';
+      ripple.style.transform = 'translate(-50%, -50%) scale(2.5)';
+      ripple.style.opacity = '0';
+    });
+  };
+
+  window.addEventListener('mousemove', (e) => {
+    window.__agySetCursorPos(e.clientX, e.clientY);
+  }, true);
+
+  window.addEventListener('mousedown', (e) => {
+    window.__agySetCursorPos(e.clientX, e.clientY);
+    window.__agyPlayClickRipple();
+  }, true);
+})();`;
+
+/**
+ * Ensures the visual AI Mouse Pointer is injected into Edge.
+ */
+async function ensureAiCursorInjected(targetWsUrl) {
+  if (_cursorInjectedTargets.has(targetWsUrl)) return;
+  try {
+    // 1. Evaluate immediately on active page
+    await sendCdpToTarget(targetWsUrl, "Runtime.evaluate", {
+      expression: AI_CURSOR_SNIPPET,
+      returnByValue: false,
+    }, 2000).catch(() => undefined);
+
+    // 2. Register for all future page navigations
+    await sendCdpToTarget(targetWsUrl, "Page.addScriptToEvaluateOnNewDocument", {
+      source: AI_CURSOR_SNIPPET,
+    }, 2000).catch(() => undefined);
+
+    _cursorInjectedTargets.add(targetWsUrl);
+  } catch (err) {
+    console.error("[EdgeVirtualEngine] Failed to inject AI cursor script:", err.message);
+  }
+}
+
+/**
  * Opens or navigates a persistent tab in Microsoft Edge to match the agent's target URL.
  */
 async function openOrNavigateEdgeTab(url, port = DEFAULT_PORT) {
@@ -247,6 +339,7 @@ async function openOrNavigateEdgeTab(url, port = DEFAULT_PORT) {
       _primaryEdgeTabId = targetTab.id;
       await sendCdpToTarget(targetTab.webSocketDebuggerUrl, "Page.navigate", { url });
       await activateEdgeTab(targetTab.id, port);
+      await ensureAiCursorInjected(targetTab.webSocketDebuggerUrl);
       return targetTab;
     }
 
@@ -255,6 +348,9 @@ async function openOrNavigateEdgeTab(url, port = DEFAULT_PORT) {
     if (targetTab && targetTab.id) {
       _primaryEdgeTabId = targetTab.id;
       await activateEdgeTab(targetTab.id, port);
+      if (targetTab.webSocketDebuggerUrl) {
+        await ensureAiCursorInjected(targetTab.webSocketDebuggerUrl);
+      }
     }
     return targetTab;
   } catch (err) {
@@ -376,7 +472,7 @@ async function navigateEdge(url, port = DEFAULT_PORT) {
 }
 
 /**
- * Dispatches CDP mouse/keyboard/text input to Edge.
+ * Dispatches CDP mouse/keyboard/text input to Edge and updates the visual AI cursor.
  */
 async function dispatchEdgeInput(method, params, port = DEFAULT_PORT) {
   const page = await getPrimaryEdgePage(port, false);
@@ -384,6 +480,20 @@ async function dispatchEdgeInput(method, params, port = DEFAULT_PORT) {
     return false;
   }
   try {
+    await ensureAiCursorInjected(page.webSocketDebuggerUrl);
+
+    // If mouse movement or press, update AI cursor position in Edge
+    if (method === "Input.dispatchMouseEvent") {
+      const x = typeof params.x === "number" ? Math.round(params.x) : 0;
+      const y = typeof params.y === "number" ? Math.round(params.y) : 0;
+
+      // Update cursor position
+      await sendCdpToTarget(page.webSocketDebuggerUrl, "Runtime.evaluate", {
+        expression: `if (window.__agySetCursorPos) window.__agySetCursorPos(${x}, ${y});${params.type === 'mousePressed' ? 'if (window.__agyPlayClickRipple) window.__agyPlayClickRipple();' : ''}`,
+        returnByValue: false,
+      }, 1000).catch(() => undefined);
+    }
+
     await sendCdpToTarget(page.webSocketDebuggerUrl, method, params, 3000);
     return true;
   } catch (err) {
@@ -440,6 +550,17 @@ async function captureEdgePageNativeImage(nativeImageMod, format = "jpeg", quali
   return null;
 }
 
+/**
+ * Executes an arbitrary CDP command directly against Microsoft Edge.
+ */
+async function sendCdpToEdge(method, params = {}, port = DEFAULT_PORT) {
+  const page = await getPrimaryEdgePage(port, false);
+  if (!page || !page.webSocketDebuggerUrl) {
+    return undefined;
+  }
+  return sendCdpToTarget(page.webSocketDebuggerUrl, method, params, 8000);
+}
+
 module.exports = {
   ensureEdgeRunning: launcher.ensureEdgeRunning,
   isEdgeRunning: launcher.isEdgeRunning,
@@ -455,5 +576,6 @@ module.exports = {
   dispatchEdgeInput,
   captureEdgeScreenshot,
   captureEdgePageNativeImage,
+  sendCdpToEdge,
   closePersistentCdp,
 };

@@ -13,6 +13,7 @@ console.log(`  - app.asar Present         : ${res.checks.appAsarExists ? 'OK' : 
 console.log(`  - app.asar Backup Present  : ${res.checks.appAsarBackupExists ? 'YES' : 'NO'}`);
 console.log(`  - app.asar Patched         : ${res.checks.appAsarPatched ? 'PATCHED (Edge Auto-launcher active)' : 'ORIGINAL (Chrome default)'}`);
 console.log(`  - Webview Virtualization   : ${res.checks.webviewVirtualizationPatched ? 'PATCHED (Edge profile & action mirror active)' : 'NOT PATCHED'}`);
+console.log(`  - Edge Actuator & AI Cursor: ${res.checks.edgeCdpActuatorPatched ? 'PATCHED (Sole Edge target & AI cursor active)' : 'NOT PATCHED'}`);
 console.log(`  - Edge Launcher in Unpacked: ${res.checks.edgeLauncherUnpackedExists ? 'DEPLOYED' : 'NOT DEPLOYED'}`);
 const mcpVerStr = res.checks.cdtMcpVersion
   ? `v${res.checks.cdtMcpVersion}${res.checks.cdtMcpLatestVersion ? ` (latest: v${res.checks.cdtMcpLatestVersion})` : ''}`
