@@ -167,7 +167,8 @@ function checkStatus() {
       checks.edgeCdpIsolatedWorldPatched = latin1.includes('executeInMainIsolatedWorld');
       checks.edgeCompanionUiPatched =
         latin1.includes('installEdgeCompanionSurface') &&
-        latin1.includes('wcv:get-edge-companion-state');
+        latin1.includes('wcv:get-edge-companion-state') &&
+        latin1.includes('wcv:edge-preview-frame');
       asarHasLegacyMainHook = latin1.includes('setupEdgeAutoLauncher');
     } catch {}
   }
@@ -336,9 +337,16 @@ function patchDistModules(distDir, srcDir) {
             (0, utils_1.setHubSurfaceTransparent)(entry.parentWindow, false);
         } catch {}
         this.detachVisibleSiblings(entry.parentWindow, entry);
-        void edgeVirtualEngine.activateIfAttached(tabKey);
+        void edgeVirtualEngine.onTabShown(tabKey);
         return this.toSnapshot(entry);
     }`
+  );
+
+  wcvContent = applyPatch(
+    'wcvBrowserRegistry.hide',
+    wcvContent,
+    'hide(tabKey) {',
+    'hide(tabKey) {\n        edgeVirtualEngine.onTabHidden(tabKey);'
   );
 
   wcvContent = applyPatch(
@@ -552,11 +560,6 @@ function patchDistModules(distDir, srcDir) {
         const tabKey = registry.getActiveTabKeyForWindow?.(win) ?? null;
         return edgeVirtualEngine.getCompanionState(tabKey, Boolean(includeScreenshot));
     });
-    registerHandle('wcv:focus-edge-window', async (event) => {
-        const { win } = assertAuthorizedWcvCaller(event, registry);
-        const tabKey = registry.getActiveTabKeyForWindow?.(win) ?? null;
-        return edgeVirtualEngine.focusEdgeWindow(tabKey);
-    });
     registerHandle('wcv:dispose', (event, tabKey) => {`
   );
 
@@ -689,9 +692,9 @@ function patchDistModules(distDir, srcDir) {
 
   fs.writeFileSync(ipcHandlersPath, ipcContent, 'utf8');
 
-  // 7. Patch dist/preload.js (Expose companion APIs & render textured Edge Companion Card inside [data-browser-hole])
+  // 7. Patch dist/preload.js (Expose companion APIs & mirror live Edge screencast inside [data-browser-hole])
   const preloadPath = path.join(distDir, 'preload.js');
-  console.log('      Patching preload.js (Branded Edge Companion Card + Live Preview)...');
+  console.log('      Patching preload.js (Live Edge screencast mirror via window.electronNative)...');
   let preloadContent = fs.readFileSync(preloadPath, 'utf8');
 
   preloadContent = applyPatch(
@@ -700,7 +703,7 @@ function patchDistModules(distDir, srcDir) {
     'ackRemoteControlCommand: (a) => electron_1.ipcRenderer.invoke(\'wcv:remote-control-command-ack\', a),',
     `ackRemoteControlCommand: (a) => electron_1.ipcRenderer.invoke('wcv:remote-control-command-ack', a),
     getEdgeCompanionState: (includeScreenshot) => electron_1.ipcRenderer.invoke('wcv:get-edge-companion-state', Boolean(includeScreenshot)),
-    focusEdgeWindow: () => electron_1.ipcRenderer.invoke('wcv:focus-edge-window'),`
+    onEdgePreviewFrame: (cb) => subscribeIpcChannel('wcv:edge-preview-frame', cb),`
   );
 
   preloadContent = applyPatch(
@@ -742,70 +745,31 @@ function patchDistModules(distDir, srcDir) {
             };
 
             const style = el('style', '',
-              '.wrap{box-sizing:border-box;width:100%;height:100%;padding:16px 20px 68px;display:flex;flex-direction:column;gap:12px;background-color:#0c0e13;background-image:radial-gradient(rgba(148,163,184,0.12) 1px,transparent 1px),radial-gradient(ellipse at 50% 0%,rgba(56,189,248,0.08),transparent 65%);background-size:20px 20px,100% 100%;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
-              '.hdr{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;border-radius:10px;background:rgba(17,22,31,0.9);border:1px solid rgba(148,163,184,0.15);backdrop-filter:blur(8px);flex-shrink:0;}' +
-              '.hdr-left{display:flex;align-items:center;gap:10px;min-width:0;}' +
-              '.dot{width:8px;height:8px;border-radius:9999px;flex-shrink:0;background:#f59e0b;box-shadow:0 0 8px rgba(245,158,11,0.55);}' +
-              '.dot.on{background:#22c55e;box-shadow:0 0 10px rgba(34,197,94,0.65);}' +
-              '.meta{display:flex;flex-direction:column;min-width:0;}' +
-              '.title{font-size:12px;font-weight:600;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
-              '.url{font-size:11px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
-              '.actions{display:flex;align-items:center;gap:8px;flex-shrink:0;pointer-events:auto;}' +
-              '.btn{appearance:none;border:1px solid rgba(56,189,248,0.42);background:rgba(14,165,233,0.16);color:#e0f2fe;font:600 11px/1 inherit;padding:7px 12px;border-radius:8px;cursor:pointer;transition:background .15s,border-color .15s;}' +
-              '.btn:hover{background:rgba(14,165,233,0.3);border-color:rgba(56,189,248,0.75);}' +
-              '.stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;position:relative;border-radius:12px;border:1px solid rgba(148,163,184,0.12);background:rgba(9,11,16,0.72);overflow:hidden;padding:10px;box-sizing:border-box;}' +
-              '.shot-box{display:none;align-items:center;justify-content:center;width:100%;height:100%;min-height:0;}' +
-              '.shot-box.show{display:flex;}' +
-              '.shot-inner{position:relative;display:inline-flex;max-width:100%;max-height:100%;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.11);box-shadow:0 16px 40px rgba(0,0,0,0.55);}' +
-              '.shot{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;}' +
-              '.reticle{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:9999px;border:2px solid #38bdf8;background:rgba(56,189,248,0.32);box-shadow:0 0 10px rgba(56,189,248,0.85);display:none;transition:left 120ms ease,top 120ms ease;}' +
-              '.reticle.show{display:block;}' +
-              '.standby{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:24px;max-width:360px;}' +
+              '.wrap{box-sizing:border-box;width:100%;height:100%;display:flex;align-items:center;justify-content:center;background-color:#0c0e13;background-image:radial-gradient(rgba(148,163,184,0.10) 1px,transparent 1px);background-size:20px 20px;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;overflow:hidden;}' +
+              '.shot{display:none;width:100%;height:100%;object-fit:contain;background:#0c0e13;}' +
+              '.shot.show{display:block;}' +
+              '.standby{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:24px 28px;max-width:380px;border-radius:14px;background:rgba(17,22,31,0.78);border:1px solid rgba(148,163,184,0.14);backdrop-filter:blur(8px);}' +
               '.standby-badge{font-size:11px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:#38bdf8;background:rgba(56,189,248,0.1);border:1px solid rgba(56,189,248,0.25);padding:4px 10px;border-radius:9999px;}' +
               '.standby-h{font-size:14px;font-weight:600;color:#f1f5f9;}' +
+              '.standby-url{font-size:11px;color:#cbd5e1;max-width:320px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:0.85;}' +
               '.standby-p{font-size:12px;line-height:1.45;color:#94a3b8;}'
             );
 
             const wrap = el('div', 'wrap');
-            const hdr = el('div', 'hdr');
-            const hdrLeft = el('div', 'hdr-left');
-            const dot = el('div', 'dot');
-            const meta = el('div', 'meta');
-            const title = el('div', 'title', 'Microsoft Edge Companion');
-            const url = el('div', 'url', 'Browser-Agent Profile');
-            meta.append(title, url);
-            hdrLeft.append(dot, meta);
-
-            const actions = el('div', 'actions');
-            const btn = el('button', 'btn', 'Bring Edge to Front');
-            btn.type = 'button';
-            btn.addEventListener('click', (ev) => {
-              ev.stopPropagation();
-              try { void window.electronNativeAPI?.wcvBrowser?.focusEdgeWindow?.(); } catch {}
-            });
-            actions.append(btn);
-            hdr.append(hdrLeft, actions);
-
-            const stage = el('div', 'stage');
-            const shotBox = el('div', 'shot-box');
-            const shotInner = el('div', 'shot-inner');
             const shot = el('img', 'shot');
-            shot.alt = 'Microsoft Edge Live Preview';
-            const reticle = el('div', 'reticle');
-            shotInner.append(shot, reticle);
-            shotBox.append(shotInner);
+            shot.alt = 'Microsoft Edge Live View';
 
             const standby = el('div', 'standby');
             const standbyBadge = el('div', 'standby-badge', 'Browser-Agent Profile');
             const standbyH = el('div', 'standby-h', 'Synced with Microsoft Edge');
-            const standbyP = el('div', 'standby-p', 'Edge launches automatically when navigating or running an agent task, or click Bring Edge to Front.');
-            standby.append(standbyBadge, standbyH, standbyP);
+            const standbyUrl = el('div', 'standby-url', '');
+            const standbyP = el('div', 'standby-p', 'Edge launches automatically when navigating or running an agent task.');
+            standby.append(standbyBadge, standbyH, standbyUrl, standbyP);
 
-            stage.append(shotBox, standby);
-            wrap.append(hdr, stage);
+            wrap.append(shot, standby);
             shadow.append(style, wrap);
 
-            host.__agyRefs = { dot, title, url, btn, shotBox, shot, reticle, standby, standbyH, standbyP };
+            host.__agyRefs = { shot, standby, standbyH, standbyUrl, standbyP };
             hole.appendChild(host);
           }
           return host;
@@ -819,47 +783,38 @@ function patchDistModules(distDir, srcDir) {
           if (!refs || !state) return;
 
           const attached = Boolean(state.attached);
-          refs.dot.classList.toggle('on', attached);
-          const displayTitle = (state.title || '').trim() || (attached ? 'Active in Microsoft Edge' : 'Standby in Microsoft Edge');
-          const displayUrl = (state.url || '').trim() || 'about:blank';
-          refs.title.textContent = (attached ? 'Edge Active · ' : 'Edge Standby · ') + displayTitle;
-          refs.url.textContent = displayUrl;
-          refs.btn.textContent = attached ? 'Bring Edge to Front' : 'Open in Edge';
+          const displayUrl = (state.url || '').trim();
+          const hasLiveShot = attached && Boolean(state.screenshotDataUrl);
 
-          if (attached && state.screenshotDataUrl) {
+          if (hasLiveShot) {
             if (refs.shot.src !== state.screenshotDataUrl) {
               refs.shot.src = state.screenshotDataUrl;
             }
-            refs.shotBox.classList.add('show');
+            refs.shot.classList.add('show');
             refs.standby.style.display = 'none';
-            if (state.cursor && state.cursor.active && state.cursor.xRatio >= 0 && state.cursor.yRatio >= 0) {
-              refs.reticle.style.left = (Math.max(0, Math.min(1, state.cursor.xRatio)) * 100).toFixed(2) + '%';
-              refs.reticle.style.top = (Math.max(0, Math.min(1, state.cursor.yRatio)) * 100).toFixed(2) + '%';
-              refs.reticle.classList.add('show');
-            } else {
-              refs.reticle.classList.remove('show');
-            }
           } else {
-            refs.shotBox.classList.remove('show');
-            refs.reticle.classList.remove('show');
+            refs.shot.classList.remove('show');
             refs.standby.style.display = 'flex';
-            refs.standbyH.textContent = attached ? 'Loading Microsoft Edge...' : 'Edge on Standby for Historical Tab';
+            refs.standbyH.textContent = attached ? 'Loading Microsoft Edge...' : 'Edge on Standby';
+            refs.standbyUrl.textContent = (displayUrl && displayUrl !== 'about:blank') ? displayUrl : '';
             refs.standbyP.textContent = attached
-              ? ('Syncing live preview for ' + displayUrl)
-              : 'Historical tabs stay closed until you click Open in Edge, navigate, or run an agent task.';
+              ? 'Connecting live view from Microsoft Edge...'
+              : 'Historical tab is paused. Navigate or run a browser task to open in Microsoft Edge.';
           }
         }
 
         async function refreshCompanion(includeScreenshot) {
           const hole = getActiveHole();
           if (!hole || pendingFetch) return;
-          const api = window.electronNativeAPI?.wcvBrowser;
+          const api = window.electronNative?.wcvBrowser;
           if (!api?.getEdgeCompanionState) return;
           pendingFetch = true;
           try {
             const st = await api.getEdgeCompanionState(Boolean(includeScreenshot));
-            activeState = st;
-            renderState(st);
+            if (st) {
+              activeState = st;
+              renderState(st);
+            }
           } catch {}
           finally {
             pendingFetch = false;
@@ -876,7 +831,7 @@ function patchDistModules(distDir, srcDir) {
                 if (document.visibilityState === 'visible') {
                   void refreshCompanion(true);
                 }
-              }, 1100);
+              }, 1400);
             }
           } else if (pollTimer) {
             clearInterval(pollTimer);
@@ -885,7 +840,13 @@ function patchDistModules(distDir, srcDir) {
         }
 
         try {
-          window.electronNativeAPI?.wcvBrowser?.onGuestEvent?.(() => {
+          const wcvApi = window.electronNative?.wcvBrowser;
+          wcvApi?.onEdgePreviewFrame?.((frame) => {
+            if (!frame) return;
+            activeState = frame;
+            if (getActiveHole()) renderState(frame);
+          });
+          wcvApi?.onGuestEvent?.(() => {
             if (getActiveHole()) void refreshCompanion(true);
           });
         } catch {}
@@ -1013,6 +974,7 @@ function install(options = {}) {
   const isV3Patched =
     asarLatin1.includes('acquireInteractiveUrl') &&
     asarLatin1.includes('installEdgeCompanionSurface') &&
+    asarLatin1.includes('wcv:edge-preview-frame') &&
     !asarLatin1.includes('setupEdgeAutoLauncher');
 
   if (!isV3Patched || options.force) {

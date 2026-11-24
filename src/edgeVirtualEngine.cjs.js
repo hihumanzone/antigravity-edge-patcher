@@ -22,6 +22,8 @@ const webviewBrowser = safeRequire('./webviewBrowser');
 const PAGE_AGENT_WORLD_NAME = guestFramePolicy?.PAGE_AGENT_ISOLATED_WORLD_NAME || 'agy_page_agent';
 const CURSOR_WORLD_NAME = 'agy_ai_cursor_overlay';
 const WCV_GUEST_EVENT_CHANNEL = 'wcv:guest-event';
+const WCV_EDGE_PREVIEW_FRAME_CHANNEL = 'wcv:edge-preview-frame';
+const WEBVIEW_OPEN_NEW_TAB_CHANNEL = 'webview:open-new-tab';
 const WEBVIEW_DIALOG_OPENING_CHANNEL = 'webview:javascript-dialog-opening';
 const WEBVIEW_FILE_CHOOSER_OPENED_CHANNEL = 'webview:file-chooser-opened';
 const WEBVIEW_NETWORK_REQUEST_CHANNEL = 'webview:network-request-updated';
@@ -37,7 +39,8 @@ const MAX_IN_FLIGHT_REQUESTS = 128;
 const FRAME_EVAL_TIMEOUT_MS = 30000;
 const NAV_WAIT_TIMEOUT_MS = 15000;
 const CDP_CMD_TIMEOUT_MS = 20000;
-const CURSOR_IDLE_FADE_MS = 2200;
+const CURSOR_IDLE_FADE_MS = 1200;
+const SCREENCAST_THROTTLE_MS = 55;
 
 const COMPUTE_OWNER_PATH_AND_RECT_FN = guestFramePolicy?.COMPUTE_OWNER_PATH_AND_RECT_FN || `function() {
   const el = this;
@@ -502,13 +505,16 @@ class EdgeTabSession {
     this.pendingWorlds = new Map();
     this.cursorScriptId = null;
 
-    // Agent control, focus emulation, ordered input queue & screenshot cache
+    // Agent control, focus emulation, ordered input queue & live screencast cache
     this.agentControlling = false;
     this.focusEmulated = false;
+    this.isVisibleInHub = false;
     this.inputQueue = Promise.resolve();
     this.layoutCache = { width: 1280, height: 800, updatedAt: 0 };
     this._previewCache = { dataUrl: '', updatedAt: 0 };
     this._previewPromise = null;
+    this._screencastRunning = false;
+    this._lastScreencastEmitAt = 0;
 
     // Cursor state (independent of OS cursor; normalized unit coords decoded via viewport bounds)
     this.cursorNormalizedMode = false;
@@ -550,6 +556,10 @@ class EdgeTabSession {
       if (this.title) entry.lastTitle = this.title;
       entry.lastHttpResponseCode = this.httpStatusCode;
       entry.lastLoadError = this.loadError;
+      if (this.layoutCache.width > 0 && this.layoutCache.height > 0) {
+        entry.lastNonZeroSize = { width: this.layoutCache.width, height: this.layoutCache.height };
+        entry.contentSizeDip = { width: this.layoutCache.width, height: this.layoutCache.height };
+      }
     }
   }
 
@@ -584,10 +594,10 @@ class EdgeTabSession {
     } catch {}
   }
 
-  _sendHubChannel(channel, payload) {
+  _sendHubChannel(channel, ...args) {
     if (!this.hubSender || this.hubSender.isDestroyed?.()) return;
     try {
-      this.hubSender.send(channel, payload);
+      this.hubSender.send(channel, ...args);
     } catch {}
   }
 
@@ -621,10 +631,13 @@ class EdgeTabSession {
       const claimed = this.engine.getClaimedTargetIds();
       let target = null;
 
-      // Claim Edge's initial New Tab or an idle blank tab before ever opening a second tab
+      // Prefer an already-matching unclaimed Edge tab (e.g. target="_blank" popup), then New Tab / blank
       const pages = await edgeLauncher.getEdgePageTargets(port);
       if (this.targetId) {
         target = pages.find((p) => p.id === this.targetId) || null;
+      }
+      if (!target && this.intendedUrl) {
+        target = pages.find((p) => !claimed.has(p.id) && p.webSocketDebuggerUrl && p.url === this.intendedUrl) || null;
       }
       if (!target) {
         target = pages.find((p) => {
@@ -682,11 +695,16 @@ class EdgeTabSession {
       }).then((r) => r?.identifier || null).catch(() => null);
 
       await this._ensureCursorBootstrapped().catch(() => undefined);
+      await this._getViewportBounds().catch(() => undefined);
       await this._refreshHistoryAndTitle().catch(() => undefined);
 
       if (this.agentControlling) {
         await this.sendCdp('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => undefined);
         this.focusEmulated = true;
+      }
+
+      if (this.isVisibleInHub) {
+        void this._syncScreencast().catch(() => undefined);
       }
 
       if (autoNavigateIntended && !this.committedUrl && this.intendedUrl) {
@@ -703,18 +721,41 @@ class EdgeTabSession {
 
   _handleWsClose() {
     this.ws = null;
+    this.targetId = null;
     this.mainFrameId = '';
+    this.committedUrl = '';
+    this.isLoading = false;
+    this._screencastRunning = false;
+    this._previewCache = { dataUrl: '', updatedAt: 0 };
     this.worlds.clear();
     this.pendingWorlds.clear();
     this.childTargets.clear();
     this.inFlightRequests.clear();
     this.focusEmulated = false;
+    if (this.pendingDialog) {
+      clearTimeout(this.pendingDialog.timer);
+      this.pendingDialog = null;
+    }
+    if (this.pendingChooser) {
+      clearTimeout(this.pendingChooser.timer);
+      this.pendingChooser = null;
+    }
     for (const [, p] of this.pendingCmds) {
       clearTimeout(p.timer);
       p.reject(new Error(`Edge CDP WebSocket closed for ${this.tabKey}`));
     }
     this.pendingCmds.clear();
     this._settleNavWaiters();
+    this._emitGuestEvent('did-stop-loading');
+    this._sendHubChannel(WCV_EDGE_PREVIEW_FRAME_CHANNEL, {
+      tabKey: this.tabKey,
+      attached: false,
+      url: this.url || this.intendedUrl || 'about:blank',
+      title: this.title || '',
+      isLoading: false,
+      screenshotDataUrl: '',
+      updatedAt: Date.now(),
+    });
   }
 
   sendCdp(method, params = {}, sessionId = '', timeoutMs = CDP_CMD_TIMEOUT_MS) {
@@ -842,8 +883,48 @@ class EdgeTabSession {
       return;
     }
 
+    if (method === 'Page.screencastFrame') {
+      const sid = params.sessionId;
+      if (sid !== undefined) {
+        void this.sendCdp('Page.screencastFrameAck', { sessionId: sid }).catch(() => undefined);
+      }
+      const now = Date.now();
+      if (params.data && now - this._lastScreencastEmitAt >= SCREENCAST_THROTTLE_MS) {
+        this._lastScreencastEmitAt = now;
+        const dataUrl = `data:image/jpeg;base64,${params.data}`;
+        this._previewCache = { dataUrl, updatedAt: now };
+        if (this.isVisibleInHub) {
+          this._sendHubChannel(WCV_EDGE_PREVIEW_FRAME_CHANNEL, {
+            tabKey: this.tabKey,
+            attached: true,
+            url: this.url || this.intendedUrl || 'about:blank',
+            title: this.title || '',
+            isLoading: Boolean(this.isLoading),
+            screenshotDataUrl: dataUrl,
+            updatedAt: now,
+          });
+        }
+      }
+      return;
+    }
+
+    if (method === 'Page.windowOpen') {
+      const openUrl = typeof params.url === 'string' ? params.url.trim() : '';
+      if (openUrl && /^https?:/i.test(openUrl) && this.wcId !== undefined) {
+        this._sendHubChannel(WEBVIEW_OPEN_NEW_TAB_CHANNEL, openUrl, this.wcId);
+      }
+      return;
+    }
+
     if (method === 'Page.frameStartedLoading') {
       if (params.frameId === this.mainFrameId || !this.mainFrameId) {
+        if (this.mainFrameId) {
+          for (const map of [this.worlds, this.pendingWorlds]) {
+            for (const k of map.keys()) {
+              if (k.startsWith(`::${this.mainFrameId}::`)) map.delete(k);
+            }
+          }
+        }
         this.isLoading = true;
         this._emitGuestEvent('did-start-loading');
       }
@@ -1996,10 +2077,43 @@ class EdgeTabSession {
     }
   }
 
+  async _syncScreencast() {
+    if (!this.ws || this.ws.readyState !== 1) {
+      this._screencastRunning = false;
+      return;
+    }
+    const wantStream = Boolean(this.isVisibleInHub && !this.closing);
+    if (wantStream && !this._screencastRunning) {
+      this._screencastRunning = true;
+      await this.sendCdp('Page.startScreencast', {
+        format: 'jpeg',
+        quality: 78,
+        everyNthFrame: 1,
+      }).catch(() => { this._screencastRunning = false; });
+    } else if (!wantStream && this._screencastRunning) {
+      this._screencastRunning = false;
+      await this.sendCdp('Page.stopScreencast').catch(() => undefined);
+    }
+  }
+
+  async setVisibleInHub(visible) {
+    this.isVisibleInHub = Boolean(visible);
+    if (this.ws && this.ws.readyState === 1) {
+      if (this.isVisibleInHub && this.targetId) {
+        await this.sendCdp('Target.activateTarget', { targetId: this.targetId }).catch(() => undefined);
+      }
+      await this._syncScreencast();
+      if (this.isVisibleInHub) {
+        const snap = await this.getCompanionSnapshot(true);
+        this._sendHubChannel(WCV_EDGE_PREVIEW_FRAME_CHANNEL, snap);
+      }
+    }
+  }
+
   async getPreviewDataUrl() {
     if (!this.ws || this.ws.readyState !== 1) return '';
     const now = Date.now();
-    if (this._previewCache.dataUrl && now - this._previewCache.updatedAt < 750) {
+    if (this._previewCache.dataUrl && now - this._previewCache.updatedAt < 400) {
       return this._previewCache.dataUrl;
     }
     if (this._previewPromise) return this._previewPromise;
@@ -2007,7 +2121,7 @@ class EdgeTabSession {
       try {
         const res = await this.sendCdp('Page.captureScreenshot', {
           format: 'jpeg',
-          quality: 74,
+          quality: 78,
           fromSurface: true,
         }, '', 5000);
         if (res?.data) {
@@ -2036,26 +2150,9 @@ class EdgeTabSession {
       title: this.title || (attached ? 'Microsoft Edge' : 'Standby in Microsoft Edge'),
       isLoading: attached ? Boolean(this.isLoading) : false,
       agentControlling: Boolean(this.agentControlling),
-      cursor: {
-        active: Boolean(this.cursor.active),
-        xRatio: this.cursor.xRatio,
-        yRatio: this.cursor.yRatio,
-        phase: this.cursor.phase,
-        label: this.cursor.label || '',
-      },
       screenshotDataUrl,
       updatedAt: Date.now(),
     };
-  }
-
-  async focusInEdge() {
-    await this.ensureAttached({ autoNavigateIntended: true });
-    if (this.targetId) {
-      await this.sendCdp('Target.activateTarget', { targetId: this.targetId }).catch(() => undefined);
-    }
-    await this.sendCdp('Page.bringToFront').catch(() => undefined);
-    edgeLauncher.focusEdgeOSWindow?.();
-    return true;
   }
 }
 
@@ -2156,33 +2253,40 @@ class EdgeVirtualEngine {
   async setAgentControlling(tabKey, active) {
     const s = this.sessionsByTabKey.get(tabKey);
     if (!s) return;
+    if (active) s.isVisibleInHub = true;
     await s.setAgentControlling(active);
   }
 
-  /** Switches active tab in Edge ONLY if Edge is already attached (never launches Edge on standby restore). */
-  async activateIfAttached(tabKey) {
+  /** Switches active Edge tab & screencast stream ONLY if Edge is already attached. */
+  async onTabShown(tabKey) {
+    for (const [k, other] of this.sessionsByTabKey.entries()) {
+      if (k !== tabKey && other.isVisibleInHub) {
+        void other.setVisibleInHub(false).catch(() => undefined);
+      }
+    }
     const s = this.sessionsByTabKey.get(tabKey);
-    if (!s || !s.ws || s.ws.readyState !== 1) return;
-    await s.activateInEdge().catch(() => undefined);
+    if (!s) return;
+    await s.setVisibleInHub(true).catch(() => undefined);
+  }
+
+  onTabHidden(tabKey) {
+    const s = this.sessionsByTabKey.get(tabKey);
+    if (s) {
+      void s.setVisibleInHub(false).catch(() => undefined);
+    }
+  }
+
+  /** Backward-compatible alias calling onTabShown. */
+  async activateIfAttached(tabKey) {
+    return this.onTabShown(tabKey);
   }
 
   /** Used strictly for newly opened interactive user tabs (e.g. '+ > Browser' -> google.com). */
   async acquireInteractiveUrl(tabKey, url) {
     const s = this.sessionsByTabKey.get(tabKey);
     if (!s || !url || url === 'about:blank') return false;
+    s.isVisibleInHub = true;
     return s.navigate(url);
-  }
-
-  async focusEdgeWindow(tabKey) {
-    const s = tabKey
-      ? this.sessionsByTabKey.get(tabKey)
-      : Array.from(this.sessionsByTabKey.values())[0];
-    if (!s) {
-      await edgeLauncher.ensureEdgeRunning();
-      edgeLauncher.focusEdgeOSWindow?.();
-      return true;
-    }
-    return s.focusInEdge();
   }
 
   async getCompanionState(tabKey, includeScreenshot = false) {
@@ -2195,10 +2299,13 @@ class EdgeVirtualEngine {
         title: '',
         isLoading: false,
         agentControlling: false,
-        cursor: null,
         screenshotDataUrl: '',
         updatedAt: Date.now(),
       };
+    }
+    if (s.ws && s.ws.readyState === 1 && !s.isVisibleInHub) {
+      s.isVisibleInHub = true;
+      void s._syncScreencast().catch(() => undefined);
     }
     return s.getCompanionSnapshot(Boolean(includeScreenshot));
   }

@@ -160,33 +160,6 @@ async function ensureEdgeRunning(port = DEFAULT_PORT) {
   return _launchPromise;
 }
 
-/** Restores and brings the Agent Edge OS window (`edge_profile`) to the foreground on Windows. */
-function focusEdgeOSWindow() {
-  if (process.platform !== 'win32') return;
-  const psScript = `
-    $ErrorActionPreference = 'SilentlyContinue'
-    $sig = '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd); [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);'
-    $win32 = Add-Type -MemberDefinition $sig -Name 'EdgeFocusWin32' -Namespace 'AgyEdge' -PassThru
-    $procs = Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object { $_.CommandLine -like '*edge_profile*' }
-    foreach ($cp in $procs) {
-      $p = Get-Process -Id $cp.ProcessId -ErrorAction SilentlyContinue
-      if ($p -and $p.MainWindowHandle -ne [IntPtr]::Zero) {
-        if ($win32::IsIconic($p.MainWindowHandle)) { [void]$win32::ShowWindowAsync($p.MainWindowHandle, 9) }
-        [void]$win32::SetForegroundWindow($p.MainWindowHandle)
-        break
-      }
-    }
-  `;
-  try {
-    const child = child_process.spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psScript], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-    child.unref();
-  } catch {}
-}
-
 module.exports = {
   DEFAULT_PORT,
   PROFILE_DIR,
@@ -194,5 +167,4 @@ module.exports = {
   isEdgeRunning,
   getEdgePageTargets,
   ensureEdgeRunning,
-  focusEdgeOSWindow,
 };

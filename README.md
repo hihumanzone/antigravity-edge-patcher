@@ -8,9 +8,9 @@ A lightweight, dependency-free patcher that replaces Google Antigravity's built-
 
 * **Edge-Only Execution**: Routes all browser subagent execution (`webview:*` isolated worlds, cross-origin OOPIFs, navigation, ordered mouse/keyboard input, screenshots, network logs, dialogs, and file uploads) straight to Microsoft Edge.
 * **No Internal `WebContentsView` Split/Overlap**: Keeps Antigravity's Hub surface opaque (`about:blank` anchor only) so no hidden Chromium guest ever loads URLs or fights for clicks.
-* **Edge Companion Card + Live Preview**: Replaces the blank Antigravity browser pane with a textured companion card displaying live synced URL/title, active vs. standby status, a **Bring Edge to Front** button, and a throttled live preview thumbnail.
+* **Live Synced Edge Preview**: Mirrors active Microsoft Edge tabs inside Antigravity via real-time CDP screencast frames while keeping Electron's internal `WebContentsView` disabled (`about:blank` anchor only).
 * **Independent AI Agent Cursor**: Renders `#antigravity-ai-cursor` inside a closed Shadow DOM in Edge with smooth glide, animated click ripple, and action status badge — driven strictly by agent actions and never hijacked by your physical mouse.
-* **On-Demand Single-Tab Launch**: Claims Edge's initial tab cleanly (zero duplicate `New Tab` + `about:blank`), stays closed on Antigravity startup and when inspecting historical conversations, and launches only on active navigation (`+ > Browser` or agent steps) or **Bring Edge to Front**.
+* **On-Demand Single-Tab Launch**: Claims Edge's initial tab cleanly (zero duplicate `New Tab` + `about:blank`), stays closed on Antigravity startup and when inspecting historical conversations, and launches only on active navigation (`+ > Browser` or agent steps).
 * **Dedicated Persistent Profile**: Isolates logins and extensions under `~/.gemini/antigravity/edge_profile` (`Browser-Agent`) on CDP port `9222`.
 * **Zero External MCP Overhead**: Connects Electron main process directly to Edge via a zero-dependency RFC6455 CDP WebSocket (`CdpWebSocket`) with no external `chrome-devtools-mcp` server or npm downloads needed.
 
