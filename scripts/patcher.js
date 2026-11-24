@@ -613,21 +613,73 @@ function install(options = {}) {
       console.log('      Verifying browserViewerTabDriver.js...');
     }
 
-    // 5e. Patch dist/wcvZOrderController.js (ensuring external auth URLs route to Edge smoothly)
+    // 5e. Patch dist/wcvZOrderController.js (Edge-Powered Virtual Actuator: navigation, perception, and inputs)
     const wcvZOrderPath = path.join(distDir, 'wcvZOrderController.js');
     if (fs.existsSync(wcvZOrderPath)) {
-      console.log('      Patching wcvZOrderController.js (Edge auth flow routing)...');
+      console.log('      Patching wcvZOrderController.js (Edge-Powered Virtual Actuator)...');
       let zorderContent = fs.readFileSync(wcvZOrderPath, 'utf8');
-      if (!zorderContent.includes('edgeVirtualEngine')) {
+
+      // 1. Navigation & Cookie Sync Bridge
+      if (!zorderContent.includes('edgeVirtualEngine.navigateEdge')) {
         const authBlock = 'if ((0, webviewBrowser_1.isExternalOnlyAuthUrl)(url)) {';
         if (zorderContent.includes(authBlock)) {
           zorderContent = zorderContent.replace(
             authBlock,
-            `try { const edgeVirtualEngine = require('./edgeVirtualEngine'); void edgeVirtualEngine.navigateEdge(url); } catch {}\n        ` + authBlock
+            `try {
+            const edgeVirtualEngine = require('./edgeVirtualEngine');
+            void edgeVirtualEngine.navigateEdge(url);
+            void edgeVirtualEngine.syncEdgeCookiesToSession(entry.view.webContents.session);
+        } catch {}
+        ` + authBlock
           );
-          fs.writeFileSync(wcvZOrderPath, zorderContent, 'utf8');
+        }
+      } else if (!zorderContent.includes('syncEdgeCookiesToSession(entry.view.webContents.session)')) {
+        zorderContent = zorderContent.replace(
+          `try { const edgeVirtualEngine = require('./edgeVirtualEngine'); void edgeVirtualEngine.navigateEdge(url); } catch {}`,
+          `try {
+            const edgeVirtualEngine = require('./edgeVirtualEngine');
+            void edgeVirtualEngine.navigateEdge(url);
+            void edgeVirtualEngine.syncEdgeCookiesToSession(entry.view.webContents.session);
+        } catch {}`
+        );
+      }
+
+      // 2. Perception Frame Capture Bridge (read directly from Microsoft Edge)
+      if (!zorderContent.includes('captureEdgePageNativeImage')) {
+        const targetCapture = 'async capturePageImage(tabKey) {';
+        if (zorderContent.includes(targetCapture)) {
+          zorderContent = zorderContent.replace(
+            targetCapture,
+            `async capturePageImage(tabKey) {
+        try {
+            const edgeVirtualEngine = require('./edgeVirtualEngine');
+            const edgeImg = await edgeVirtualEngine.captureEdgePageNativeImage(electron_1.nativeImage);
+            if (edgeImg && !edgeImg.isEmpty?.()) {
+                return edgeImg;
+            }
+        } catch (e) {}`
+          );
         }
       }
+
+      // 3. Interaction Input Dispatch Bridge (clicks, keys, typing routed to Microsoft Edge)
+      if (!zorderContent.includes('dispatchEdgeInput')) {
+        const targetSendCdp = 'async sendCdp(tabKey, method, params) {';
+        if (zorderContent.includes(targetSendCdp)) {
+          zorderContent = zorderContent.replace(
+            targetSendCdp,
+            `async sendCdp(tabKey, method, params) {
+        if (method && method.startsWith('Input.')) {
+            try {
+                const edgeVirtualEngine = require('./edgeVirtualEngine');
+                void edgeVirtualEngine.dispatchEdgeInput(method, params);
+            } catch (e) {}
+        }`
+          );
+        }
+      }
+
+      fs.writeFileSync(wcvZOrderPath, zorderContent, 'utf8');
     }
 
     console.log('      Repacking patched app.asar with unpacked chrome-devtools-mcp...');

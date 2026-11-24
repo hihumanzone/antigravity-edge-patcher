@@ -11,36 +11,96 @@ try {
 
 const DEFAULT_PORT = launcher.DEFAULT_PORT || 9222;
 
+let _persistentWs = null;
+let _persistentWsUrl = null;
+let _cdpNextId = 1;
+const _cdpPending = new Map();
+
+function closePersistentCdp() {
+  if (_persistentWs) {
+    try {
+      _persistentWs.close();
+    } catch {}
+    _persistentWs = null;
+    _persistentWsUrl = null;
+  }
+  for (const [, item] of _cdpPending.entries()) {
+    clearTimeout(item.timer);
+    item.reject(new Error("CDP connection closed"));
+  }
+  _cdpPending.clear();
+}
+
+async function getOrCreatePersistentCdp(targetWsUrl) {
+  if (_persistentWs && _persistentWsUrl === targetWsUrl && _persistentWs.readyState === 1) {
+    return _persistentWs;
+  }
+  closePersistentCdp();
+
+  const ws = new globalThis.WebSocket(targetWsUrl);
+  _persistentWs = ws;
+  _persistentWsUrl = targetWsUrl;
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try {
+        ws.close();
+      } catch {}
+      reject(new Error("Timeout connecting to Edge CDP WebSocket"));
+    }, 4000);
+
+    ws.onopen = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    ws.onerror = (err) => {
+      clearTimeout(timer);
+      reject(err);
+    };
+  });
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.id && _cdpPending.has(msg.id)) {
+        const item = _cdpPending.get(msg.id);
+        _cdpPending.delete(msg.id);
+        clearTimeout(item.timer);
+        if (msg.error) item.reject(new Error(msg.error.message));
+        else item.resolve(msg.result);
+      }
+    } catch {}
+  };
+
+  ws.onclose = () => {
+    if (_persistentWs === ws) {
+      _persistentWs = null;
+      _persistentWsUrl = null;
+    }
+  };
+
+  return ws;
+}
+
 /**
  * Connects to Edge's CDP browser or page WebSocket and executes a CDP method.
  */
-async function sendCdpToTarget(targetWsUrl, method, params = {}) {
-  const ws = new globalThis.WebSocket(targetWsUrl);
+async function sendCdpToTarget(targetWsUrl, method, params = {}, timeoutMs = 8000) {
   try {
-    await new Promise((resolve, reject) => {
-      ws.onopen = resolve;
-      ws.onerror = reject;
-    });
-
+    const ws = await getOrCreatePersistentCdp(targetWsUrl);
+    const id = ++_cdpNextId;
     return await new Promise((resolve, reject) => {
-      const id = 1;
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.id === id) {
-            if (msg.error) reject(new Error(msg.error.message));
-            else resolve(msg.result);
-          }
-        } catch (err) {
-          reject(err);
-        }
-      };
+      const timer = setTimeout(() => {
+        _cdpPending.delete(id);
+        reject(new Error(`CDP ${method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      _cdpPending.set(id, { resolve, reject, timer });
       ws.send(JSON.stringify({ id, method, params }));
     });
-  } finally {
-    try {
-      ws.close();
-    } catch {}
+  } catch (err) {
+    closePersistentCdp();
+    throw err;
   }
 }
 
@@ -134,10 +194,16 @@ let _primaryEdgeTabId = null;
 /**
  * Gets or creates the primary active page target in Edge.
  */
-async function getPrimaryEdgePage(port = DEFAULT_PORT) {
-  await launcher.ensureEdgeRunning(port);
+async function getPrimaryEdgePage(port = DEFAULT_PORT, autoLaunch = false) {
+  if (autoLaunch) {
+    await launcher.ensureEdgeRunning(port);
+  } else {
+    const running = await launcher.isEdgeRunning(port);
+    if (!running) return null;
+  }
+
   let tabs = await listEdgeTabs(port);
-  if (tabs.length === 0) {
+  if (tabs.length === 0 && autoLaunch) {
     const newTab = await createEdgeTab("about:blank", port);
     if (newTab) {
       _primaryEdgeTabId = newTab.id;
@@ -201,18 +267,28 @@ async function openOrNavigateEdgeTab(url, port = DEFAULT_PORT) {
  * Retrieves all cookies from Edge's Browser-Agent profile via CDP.
  */
 async function getEdgeCookies(port = DEFAULT_PORT) {
-  await launcher.ensureEdgeRunning(port);
-  const page = await getPrimaryEdgePage(port);
+  const page = await getPrimaryEdgePage(port, false);
   if (!page || !page.webSocketDebuggerUrl) {
     return [];
   }
   try {
-    const res = await sendCdpToTarget(page.webSocketDebuggerUrl, "Network.getAllCookies");
-    return Array.isArray(res.cookies) ? res.cookies : [];
+    // Try modern Storage.getCookies first
+    const res = await sendCdpToTarget(page.webSocketDebuggerUrl, "Storage.getCookies", {}, 4000);
+    if (res && Array.isArray(res.cookies)) {
+      return res.cookies;
+    }
+  } catch {}
+
+  try {
+    // Fallback to Network.getAllCookies
+    const res2 = await sendCdpToTarget(page.webSocketDebuggerUrl, "Network.getAllCookies", {}, 4000);
+    if (res2 && Array.isArray(res2.cookies)) {
+      return res2.cookies;
+    }
   } catch (err) {
     console.error("[EdgeVirtualEngine] Error fetching Edge cookies:", err.message);
-    return [];
   }
+  return [];
 }
 
 /**
@@ -269,7 +345,7 @@ function setupCookieSyncWatcher(targetSession, port = DEFAULT_PORT) {
   targetSession.cookies.on("changed", async (_event, cookie, cause, removed) => {
     if (cause === "explicit" && !removed) {
       try {
-        const page = await getPrimaryEdgePage(port);
+        const page = await getPrimaryEdgePage(port, false);
         if (!page || !page.webSocketDebuggerUrl) return;
 
         const domainClean = cookie.domain.startsWith(".") ? cookie.domain.slice(1) : cookie.domain;
@@ -293,7 +369,7 @@ function setupCookieSyncWatcher(targetSession, port = DEFAULT_PORT) {
 }
 
 /**
- * Navigates Edge's active page target to a URL.
+ * Navigates Edge's active page target to a URL on demand.
  */
 async function navigateEdge(url, port = DEFAULT_PORT) {
   return openOrNavigateEdgeTab(url, port);
@@ -303,12 +379,12 @@ async function navigateEdge(url, port = DEFAULT_PORT) {
  * Dispatches CDP mouse/keyboard/text input to Edge.
  */
 async function dispatchEdgeInput(method, params, port = DEFAULT_PORT) {
-  const page = await getPrimaryEdgePage(port);
+  const page = await getPrimaryEdgePage(port, false);
   if (!page || !page.webSocketDebuggerUrl) {
     return false;
   }
   try {
-    await sendCdpToTarget(page.webSocketDebuggerUrl, method, params);
+    await sendCdpToTarget(page.webSocketDebuggerUrl, method, params, 3000);
     return true;
   } catch (err) {
     console.error(`[EdgeVirtualEngine] Error dispatching ${method} to Edge:`, err.message);
@@ -320,15 +396,20 @@ async function dispatchEdgeInput(method, params, port = DEFAULT_PORT) {
  * Captures a high-resolution screenshot from Edge via CDP.
  */
 async function captureEdgeScreenshot(format = "jpeg", quality = 80, port = DEFAULT_PORT) {
-  const page = await getPrimaryEdgePage(port);
+  const page = await getPrimaryEdgePage(port, false);
   if (!page || !page.webSocketDebuggerUrl) {
     return null;
   }
   try {
-    const res = await sendCdpToTarget(page.webSocketDebuggerUrl, "Page.captureScreenshot", {
-      format,
-      quality: format === "jpeg" ? quality : undefined,
-    });
+    const res = await sendCdpToTarget(
+      page.webSocketDebuggerUrl,
+      "Page.captureScreenshot",
+      {
+        format,
+        quality: format === "jpeg" ? quality : undefined,
+      },
+      8000
+    );
     if (res && res.data) {
       return Buffer.from(res.data, "base64");
     }
@@ -339,8 +420,29 @@ async function captureEdgeScreenshot(format = "jpeg", quality = 80, port = DEFAU
   }
 }
 
+/**
+ * Captures a screenshot from Edge and wraps it in an Electron nativeImage.
+ */
+async function captureEdgePageNativeImage(nativeImageMod, format = "jpeg", quality = 80, port = DEFAULT_PORT) {
+  try {
+    const buf = await captureEdgeScreenshot(format, quality, port);
+    if (buf && buf.length > 0) {
+      if (nativeImageMod && typeof nativeImageMod.createFromBuffer === "function") {
+        const img = nativeImageMod.createFromBuffer(buf);
+        if (img && !img.isEmpty?.()) {
+          return img;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[EdgeVirtualEngine] Error creating nativeImage from Edge screenshot:", err.message);
+  }
+  return null;
+}
+
 module.exports = {
   ensureEdgeRunning: launcher.ensureEdgeRunning,
+  isEdgeRunning: launcher.isEdgeRunning,
   listEdgeTabs,
   getPrimaryEdgePage,
   createEdgeTab,
@@ -352,4 +454,6 @@ module.exports = {
   navigateEdge,
   dispatchEdgeInput,
   captureEdgeScreenshot,
+  captureEdgePageNativeImage,
+  closePersistentCdp,
 };
